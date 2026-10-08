@@ -3,4 +3,5 @@ numpy
 pandas
 pytest
 # Optional: only needed for LLMRewriter. The demo works without it.
+# Checked against anthropic 0.125 (Python 3.9); 1.x needs Python >= 3.10.
 anthropic
