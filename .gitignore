@@ -16,3 +16,6 @@ venv/
 *.vcf
 *.gz
 demo/data/
+
+# TracePatch output (patched scripts and diffs)
+tracepatch_out/
