@@ -100,7 +100,10 @@ def pick_fault_line(samples: List[Sample], killed: bool) -> Tuple[Optional[int],
 
 
 def trace(script: str, args: Sequence[str] = (), mem_limit_mb: float = 300,
-          timeout_s: Optional[float] = None) -> TraceResult:
+          timeout_s: Optional[float] = None, env: Optional[dict] = None,
+          cwd: Optional[str] = None) -> TraceResult:
+    """env/cwd let the orchestrator run REWRITTEN code with the sandbox's
+    clean environment and temp directory (full-scale verification)."""
     script = os.path.abspath(script)
     workdir = tempfile.mkdtemp(prefix="tracepatch_gate1_")
     samples_path = os.path.join(workdir, "samples.txt")
@@ -111,7 +114,8 @@ def trace(script: str, args: Sequence[str] = (), mem_limit_mb: float = 300,
 
     # Child output goes to files, not pipes: a full pipe would block the child.
     with open(out_path, "w") as out_f, open(err_path, "w") as err_f:
-        run = run_watched(cmd, mem_limit_mb, timeout_s, stdout=out_f, stderr=err_f)
+        run = run_watched(cmd, mem_limit_mb, timeout_s, stdout=out_f, stderr=err_f,
+                          cwd=cwd, env=env)
     killed, timed_out, rc, peak_bytes = run.killed_by_cap, run.timed_out, run.returncode, run.peak_bytes
 
     samples = read_samples(samples_path)

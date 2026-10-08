@@ -68,7 +68,8 @@ def extract_imports(script_source: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _clean_env() -> dict:
+def clean_env() -> dict:
+    """Only a few harmless variables; no API keys or other secrets."""
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
@@ -90,7 +91,7 @@ def run_in_sandbox(source: str, func_name: str, sample_path: str,
         with open(os.path.join(workdir, "stdout.txt"), "w") as out_f, \
                 open(os.path.join(workdir, "stderr.txt"), "w") as err_f:
             run = run_watched([sys.executable, CHILD_PATH, job_path], mem_limit_mb, timeout_s,
-                              stdout=out_f, stderr=err_f, cwd=workdir, env=_clean_env())
+                              stdout=out_f, stderr=err_f, cwd=workdir, env=clean_env())
         peak = run.peak_bytes / (1024 * 1024)
         if run.timed_out:
             return SandboxRun(False, error="timed out", timed_out=True, peak_mb=peak)
