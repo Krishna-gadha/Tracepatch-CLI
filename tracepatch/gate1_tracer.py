@@ -10,8 +10,8 @@ Demo safety: we never actually exhaust the laptop's RAM. A watchdog in this
 --mem-limit-mb. We report that as a simulated exit 137.
 
 Honest limits:
-- The watchdog polls every 10 ms, so a very fast allocator can overshoot the
-  cap a little before it is killed.
+- The watchdog (watchdog.py) polls every 10 ms, so a very fast allocator
+  can overshoot the cap a little before it is killed.
 - Line attribution is sampled, not exact. If C code holds the GIL for a long
   time the sampler thread waits, so the recorded line can lag slightly.
 - Only the child's own RSS is measured, not grandchild processes.
@@ -19,17 +19,14 @@ Honest limits:
 
 import argparse
 import os
-import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
-import psutil
+from tracepatch.watchdog import run_watched
 
 CHILD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_trace_child.py")
-WATCHDOG_INTERVAL_S = 0.01
 SIMULATED_OOM_EXIT = 137  # 128 + SIGKILL(9): what Linux reports on an OOM kill
 
 # One sample = (seconds since start, rss bytes, line number, function name)
@@ -44,7 +41,7 @@ class TraceResult:
     timed_out: bool
     exit_code: int
     peak_mb: float
-    peak_line: int
+    peak_line: Optional[int]  # None = no sample landed inside the script
     peak_function: str
     stdout: str = ""
     stderr: str = ""
@@ -64,9 +61,10 @@ class TraceResult:
     def summary(self) -> str:
         status = "KILLED by memory cap (simulated exit 137)" if self.killed_by_cap \
             else f"finished, exit code {self.exit_code}"
+        where = (f"at line {self.peak_line} in {self.peak_function}()" if self.peak_line
+                 else "at an unknown line (no sample landed inside the script)")
         return (f"{os.path.basename(self.script)}: {status}; "
-                f"peak {self.peak_mb:.1f} MB (cap {self.mem_limit_mb:.0f} MB) "
-                f"at line {self.peak_line} in {self.peak_function}()")
+                f"peak {self.peak_mb:.1f} MB (cap {self.mem_limit_mb:.0f} MB) {where}")
 
 
 def read_samples(path: str) -> List[Sample]:
@@ -86,11 +84,13 @@ def read_samples(path: str) -> List[Sample]:
     return samples
 
 
-def pick_fault_line(samples: List[Sample], killed: bool) -> Tuple[int, str]:
+def pick_fault_line(samples: List[Sample], killed: bool) -> Tuple[Optional[int], str]:
     # Only samples taken while inside the user's script have a real line.
     in_script = [s for s in samples if s[2] > 0]
     if not in_script:
-        return 0, "?"
+        # The script hit the cap faster than one sampling interval. Say
+        # "unknown" rather than guess.
+        return None, "?"
     if killed:
         # The line running when we pulled the plug is the culprit.
         chosen = in_script[-1]
@@ -102,37 +102,17 @@ def pick_fault_line(samples: List[Sample], killed: bool) -> Tuple[int, str]:
 def trace(script: str, args: Sequence[str] = (), mem_limit_mb: float = 300,
           timeout_s: Optional[float] = None) -> TraceResult:
     script = os.path.abspath(script)
-    limit_bytes = mem_limit_mb * 1024 * 1024
     workdir = tempfile.mkdtemp(prefix="tracepatch_gate1_")
     samples_path = os.path.join(workdir, "samples.txt")
     out_path = os.path.join(workdir, "stdout.txt")
     err_path = os.path.join(workdir, "stderr.txt")
 
     cmd = [sys.executable, CHILD_PATH, samples_path, script, *args]
-    killed = timed_out = False
-    peak_bytes = 0
-    start = time.time()
 
     # Child output goes to files, not pipes: a full pipe would block the child.
     with open(out_path, "w") as out_f, open(err_path, "w") as err_f:
-        proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f)
-        ps = psutil.Process(proc.pid)
-        while proc.poll() is None:
-            try:
-                rss = ps.memory_info().rss
-            except psutil.NoSuchProcess:
-                break
-            peak_bytes = max(peak_bytes, rss)
-            if rss > limit_bytes:
-                proc.kill()  # SIGKILL on Unix, TerminateProcess on Windows
-                killed = True
-                break
-            if timeout_s is not None and time.time() - start > timeout_s:
-                proc.kill()
-                timed_out = True
-                break
-            time.sleep(WATCHDOG_INTERVAL_S)
-        rc = proc.wait()
+        run = run_watched(cmd, mem_limit_mb, timeout_s, stdout=out_f, stderr=err_f)
+    killed, timed_out, rc, peak_bytes = run.killed_by_cap, run.timed_out, run.returncode, run.peak_bytes
 
     samples = read_samples(samples_path)
     if samples:

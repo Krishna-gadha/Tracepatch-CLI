@@ -3,7 +3,7 @@ import os
 from tracepatch.gate1_tracer import SIMULATED_OOM_EXIT, trace
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
-HOG_LINE = 5  # the blocks.append(...) line in fixtures/hog.py
+HOG_LINE = 10  # the blocks.append(...) line in fixtures/hog.py
 
 
 def test_hog_is_killed_at_the_right_line():
@@ -33,3 +33,9 @@ def test_ordinary_exception_is_not_reported_as_oom():
     assert r.exit_code == 1
     assert "RuntimeError" in r.stderr
     assert r.to_contract() is None
+
+
+def test_no_in_script_sample_means_unknown_line_not_zero():
+    from tracepatch.gate1_tracer import pick_fault_line
+    # Only the start-up sample (line 0 = not yet inside the script).
+    assert pick_fault_line([(0.0, 12_000_000, 0, "?")], killed=True) == (None, "?")

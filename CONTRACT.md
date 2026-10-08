@@ -23,6 +23,8 @@ These override the frozen sections below once both of us agree tonight.
 | Gate 2 | blocklist | **allowlist, default-deny** (blocklist said "safe" for anything unseen) |
 | Oracle tolerance | `rtol=1e-9` | `numpy.allclose(rtol=1e-5, atol=1e-8)` |
 | Retry | none | after Gate 3 passes, re-run at full scale with Gate 1 attached; if memory still spikes, loop Gate 2 → rewrite → Gate 3, **max 3 attempts**, then fail loudly |
+| Rewrite output | plain function source | same, **and** must read with `chunksize=CHUNKSIZE` (a name, not a number). Gate 3 sets it small so the sample is split into several chunks and the merge logic is actually tested; Gate 3 rejects patches that don't use it |
+| Gate 3 input | original + patched source + sample path | also `func_name` and `preamble` (the script's top-level imports) — see `verify_patch()` in `tracepatch/gate3_sandbox.py` |
 | Fixtures | `make_test_data.py`, `bad_script.py`, `bad_script_median.py` | `demo/make_data.py`, `demo/safe_pipeline.py`, `demo/unsafe_pipeline.py` |
 
 The dict shapes for each gate below are **unchanged** (Gate 2 success may add an extra `function_name` key).
