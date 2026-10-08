@@ -1,0 +1,6 @@
+psutil
+numpy
+pandas
+pytest
+# Optional: only needed for LLMRewriter. The demo works without it.
+anthropic

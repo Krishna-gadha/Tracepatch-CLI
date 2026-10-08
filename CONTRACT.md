@@ -13,6 +13,22 @@ Shared file: `main.py` — edited only during joint integration sessions.
 
 ---
 
+## Proposed changes — Oct 8, 2026 (PENDING Nandana's review)
+
+These override the frozen sections below once both of us agree tonight.
+
+| Topic | Was (Jul 24) | Proposed |
+|---|---|---|
+| Layout | `gates/detect/`, `gates/verify/`, `main.py` | single package `tracepatch/` (`gate1_tracer.py`, `gate2_ast.py`, `rewriter.py`, `gate3_sandbox.py`, `gate3_oracle.py`, `orchestrator.py`, `cli.py`) |
+| Gate 2 | blocklist | **allowlist, default-deny** (blocklist said "safe" for anything unseen) |
+| Oracle tolerance | `rtol=1e-9` | `numpy.allclose(rtol=1e-5, atol=1e-8)` |
+| Retry | none | after Gate 3 passes, re-run at full scale with Gate 1 attached; if memory still spikes, loop Gate 2 → rewrite → Gate 3, **max 3 attempts**, then fail loudly |
+| Fixtures | `make_test_data.py`, `bad_script.py`, `bad_script_median.py` | `demo/make_data.py`, `demo/safe_pipeline.py`, `demo/unsafe_pipeline.py` |
+
+The dict shapes for each gate below are **unchanged** (Gate 2 success may add an extra `function_name` key).
+
+---
+
 ## Gate 1 — Memory tracer (A produces)
 
 Input: path to the target Python script.
