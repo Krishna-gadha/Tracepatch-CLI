@@ -1,0 +1,42 @@
+"""The two demo pipelines, through the real CLI, on generated data."""
+import os
+import sys
+
+import pandas as pd
+import pytest
+
+from tracepatch.cli import main
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "demo"))
+from make_data import make  # noqa: E402
+
+CAP = "200"  # 1M rows: eager read ~270 MB, chunked ~110 MB (measured)
+
+
+@pytest.fixture(scope="module")
+def data(tmp_path_factory):
+    return make(1_000_000, str(tmp_path_factory.mktemp("demo") / "variants.csv"))
+
+
+def test_safe_demo_produces_verified_patch(data, tmp_path, capsys):
+    code = main(["run", os.path.join(ROOT, "demo", "safe_pipeline.py"), "--data", data,
+                 "--mem-limit-mb", CAP, "--out-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "[Gate 1] KILLED" in out and "df = pd.read_csv(path)" in out
+    assert "VERIFIED PATCH" in out
+    d = pd.read_csv(data)["depth"]
+    assert f"sites={len(d)}, called={d.count()}, total_depth={d.sum():.3f}" in out
+    assert os.path.exists(tmp_path / "safe_pipeline.patched.py")
+    assert os.path.exists(tmp_path / "safe_pipeline.diff")
+
+
+def test_unsafe_demo_is_refused(data, tmp_path, capsys):
+    out_dir = tmp_path / "out"
+    code = main(["run", os.path.join(ROOT, "demo", "unsafe_pipeline.py"), "--data", data,
+                 "--mem-limit-mb", CAP, "--out-dir", str(out_dir)])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "REFUSED: non-decomposable op: median()" in out
+    assert "[Rewrite]" not in out and not out_dir.exists()

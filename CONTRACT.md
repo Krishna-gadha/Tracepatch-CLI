@@ -13,9 +13,9 @@ Shared file: `main.py` — edited only during joint integration sessions.
 
 ---
 
-## Proposed changes — Oct 8, 2026 (PENDING Nandana's review)
+## Changes agreed Oct 8, 2026 (both authors)
 
-These override the frozen sections below once both of us agree tonight.
+These override the Jul 24 sections below wherever they differ.
 
 | Topic | Was (Jul 24) | Proposed |
 |---|---|---|
