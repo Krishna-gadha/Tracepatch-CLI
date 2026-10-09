@@ -203,6 +203,7 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
 
             say(f"[Verify] peak {full.peak_mb:.0f} MB, under the {mem_limit_mb:.0f} MB cap -> OK")
             report.patched_output = full.stdout.strip()
+            shown_output = report.patched_output.replace("\n", "\n" + " " * 17)
             _write_outputs(report, script, original_source, candidate, out_dir)
             return finish("verified",
                           f"{report.patch_path}\n"
@@ -210,7 +211,7 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
                           f"(reached {report.before_peak_mb:.0f} MB)\n"
                           f"  memory after:  {report.after_peak_mb:.0f} MB peak on the full file\n"
                           f"  diff:          {report.diff_path}\n"
-                          f"  output:        {report.patched_output}")
+                          f"  output:        {shown_output}")
 
         return finish("failed", f"no memory-safe, verified patch after {max_attempts} attempts "
                                 f"(last problem: {feedback})")

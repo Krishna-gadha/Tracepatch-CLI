@@ -149,10 +149,12 @@ def main():
     p.add_argument("script_args", nargs="*")
     p.add_argument("--mem-limit-mb", type=float, default=300)
     p.add_argument("--timeout", type=float, default=None)
+    p.add_argument("--json", action="store_true", help="also print the CONTRACT.md dict")
     a = p.parse_args()
     result = trace(a.script, a.script_args, a.mem_limit_mb, a.timeout)
     print(result.summary())
-    print("contract:", result.to_contract())
+    if a.json:
+        print("contract:", result.to_contract())
 
 
 if __name__ == "__main__":
