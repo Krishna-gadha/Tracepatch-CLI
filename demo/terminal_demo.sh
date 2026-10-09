@@ -52,8 +52,8 @@ if [ ! -f "$DATA" ]; then
   fi
 fi
 
-step 1 "Load the dataset"
-say "The input file on this laptop."
+step 1 "The dataset (a file on disk, not loaded yet)"
+say "This file is saved on the laptop's disk. Nothing has been loaded into memory yet."
 run ls -lh "$DATA"
 say "How many rows?"
 echo "${bold}\$ wc -l $DATA${reset}"; wc -l < "$DATA" | awk '{printf "%\047d lines\n", $1}'
@@ -69,16 +69,16 @@ pause
 
 step 2 "The analysis script"
 LOAD_LINE=$(grep -n "read_csv" "$SCRIPT" | head -1 | cut -d: -f1)
-say "Line $LOAD_LINE loads the WHOLE file into memory at once."
+say "Line $LOAD_LINE is where the file gets loaded: read_csv copies the WHOLE file from disk into memory (RAM)."
 echo "${bold}\$ cat -n $SCRIPT${reset}"
 awk -v from="$(grep -n '^import' "$SCRIPT" | head -1 | cut -d: -f1)" 'NR>=from { printf "%4d  %s\n", NR, $0 }' "$SCRIPT"
 pause
 
-step 3 "Run the script normally"
+step 3 "Run the script normally (this is when the file is loaded)"
 say "Measured by macOS itself (/usr/bin/time), not by TracePatch."
 echo "${bold}\$ python3 $SCRIPT $DATA${reset}"
 measure python3 "$SCRIPT" "$DATA"; MB=$PEAK
-echo "${red}${bold}  → peak memory: ${MB} MB${reset}  (grows with the size of the file)"
+echo "${red}${bold}  → peak memory: ${MB} MB${reset}  (the file is $(du -h "$DATA" | cut -f1)B on disk; loaded into RAM it needs much more)"
 pause
 
 step 4 "Run it with a ${CAP} MB memory limit: it crashes"
