@@ -100,3 +100,4 @@ def test_splice_and_chunksize_helpers():
     assert "return 2" in out and "return 1" not in out
     assert out.rstrip().endswith("print(f(0))")
     assert ensure_chunksize(out) == out  # not added twice
+    assert "CHUNKSIZE = 20_000" in ensure_chunksize(src, 20_000)

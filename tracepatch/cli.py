@@ -28,12 +28,15 @@ def main(argv=None) -> int:
                    choices=range(1, MAX_ATTEMPTS + 1), help=f"at most {MAX_ATTEMPTS}")
     r.add_argument("--sample-rows", type=int, default=5000,
                    help="rows used by the Gate 3 sandbox comparison (default 5000)")
+    r.add_argument("--chunk-rows", type=int, default=100_000,
+                   help="rows per chunk in the patched script (default 100000; "
+                        "use fewer for wide tables)")
     r.add_argument("--out-dir", default="tracepatch_out", help="where the patch and diff go")
     r.add_argument("--timeout", type=float, default=600, help="seconds per script run")
     a = p.parse_args(argv)
 
     report = run(a.script, a.data, a.mem_limit_mb, a.rewriter, a.max_attempts,
-                 a.sample_rows, a.out_dir, a.timeout)
+                 a.sample_rows, a.out_dir, a.timeout, chunk_rows=a.chunk_rows)
     return report.exit_code
 
 

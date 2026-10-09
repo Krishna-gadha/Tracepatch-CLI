@@ -92,7 +92,8 @@ def _show_line(source: str, line_no: int) -> str:
 def run(script: str, data: str, mem_limit_mb: float = 300,
         rewriter: Union[str, Rewriter] = "template", max_attempts: int = MAX_ATTEMPTS,
         sample_rows: int = 5000, out_dir: str = "tracepatch_out",
-        timeout_s: Optional[float] = 600, echo: Callable[[str], None] = print) -> RunReport:
+        timeout_s: Optional[float] = 600, echo: Callable[[str], None] = print,
+        chunk_rows: int = FULL_CHUNKSIZE) -> RunReport:
     if not 1 <= max_attempts <= MAX_ATTEMPTS:
         raise ValueError(f"max_attempts must be between 1 and {MAX_ATTEMPTS}")
     script, data = os.path.abspath(script), os.path.abspath(data)
@@ -171,7 +172,9 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             say(f"[Gate 3] sandbox on a {sample_rows:,}-row sample: outputs match -> OK")
 
             # ---- Full-scale verification of the whole patched script.
-            candidate = ensure_chunksize(splice_function(current_source, func_name, patched_func))
+            # chunk_rows: wide tables (many text columns) need smaller chunks.
+            candidate = ensure_chunksize(splice_function(current_source, func_name, patched_func),
+                                         chunk_rows)
             cand_path = os.path.join(workdir, os.path.basename(script))
             with open(cand_path, "w") as f:
                 f.write(candidate)

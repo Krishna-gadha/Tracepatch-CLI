@@ -5,6 +5,10 @@
 #   bash demo/terminal_demo.sh path/to/your.csv   # "upload" your own CSV (needs a depth column)
 #   CAP=200 bash demo/terminal_demo.sh file.csv   # smaller files need a smaller memory cap
 #
+# Real ClinVar data (see demo/clinvar_summary.py for the download command):
+#   SCRIPT=demo/clinvar_summary.py UNSAFE=demo/clinvar_median.py CAP=500 CHUNK_ROWS=25000 \
+#     bash demo/terminal_demo.sh demo/data/clinvar.tsv
+#
 # Story: a scientist has their own analysis script and their own dataset.
 # The script crashes on the big file. TracePatch finds the line, fixes it,
 # and proves the fix. Press Enter between steps so you can explain.
@@ -12,8 +16,10 @@
 
 cd "$(dirname "$0")/.." || exit 1
 DATA="${1:-demo/big.csv}"
-SCRIPT="demo/safe_pipeline.py"
-UNSAFE="demo/unsafe_pipeline.py"
+SCRIPT="${SCRIPT:-demo/safe_pipeline.py}"     # the scientist's script
+UNSAFE="${UNSAFE:-demo/unsafe_pipeline.py}"   # the median script (must be refused)
+CHUNK_ROWS="${CHUNK_ROWS:-100000}"            # wide tables (e.g. ClinVar) need fewer
+NAME=$(basename "$SCRIPT" .py)
 CAP="${CAP:-300}"   # override: CAP=200 bash demo/terminal_demo.sh file.csv
 
 bold=$(tput bold 2>/dev/null); dim=$(tput dim 2>/dev/null); reset=$(tput sgr0 2>/dev/null)
@@ -52,12 +58,15 @@ run ls -lh "$DATA"
 say "How many rows?"
 echo "${bold}\$ wc -l $DATA${reset}"; wc -l < "$DATA" | awk '{printf "%\047d lines\n", $1}'
 say "First 5 rows:"
-echo "${bold}\$ head -6 $DATA${reset}"; head -6 "$DATA" | column -t -s,
+echo "${bold}\$ head -6 $DATA${reset}"
+if [[ "$DATA" == *.tsv ]]; then head -6 "$DATA" | cut -f1-8 | cut -c1-150; else head -6 "$DATA" | column -t -s,; fi
 pause
 
 step 2 "The scientist's analysis code"
-say "A normal pandas script. Line 17 loads the WHOLE file into memory at once."
-echo "${bold}\$ cat -n $SCRIPT${reset}"; awk 'NR>=13 && NR<=34 { printf "%4d  %s\n", NR, $0 }' "$SCRIPT"
+LOAD_LINE=$(grep -n "read_csv" "$SCRIPT" | head -1 | cut -d: -f1)
+say "A normal pandas script. Line $LOAD_LINE loads the WHOLE file into memory at once."
+echo "${bold}\$ cat -n $SCRIPT${reset}"
+awk -v from="$(grep -n '^import' "$SCRIPT" | head -1 | cut -d: -f1)" 'NR>=from { printf "%4d  %s\n", NR, $0 }' "$SCRIPT"
 pause
 
 step 3 "Run it the normal way: how much memory does it need?"
@@ -77,29 +86,30 @@ pause
 step 5 "Give the code + the dataset to TracePatch"
 say "One command: trace → AST check → rewrite → sandbox test → full-scale check."
 rm -rf tracepatch_out
-run python3 -m tracepatch run "$SCRIPT" --data "$DATA" --mem-limit-mb $CAP
+run python3 -m tracepatch run "$SCRIPT" --data "$DATA" --mem-limit-mb $CAP --chunk-rows $CHUNK_ROWS
 pause
 
-if [ ! -f tracepatch_out/safe_pipeline.patched.py ]; then
+if [ ! -f tracepatch_out/$NAME.patched.py ]; then
   echo "${red}No patch was made: this file fits under the ${CAP} MB cap, so there was nothing to fix.${reset}"
   echo "Use a bigger file, or a smaller cap, e.g.:  CAP=200 bash demo/terminal_demo.sh $DATA"
   exit 0
 fi
 
 step 6 "What did TracePatch change?"
-run cat tracepatch_out/safe_pipeline.diff
+run cat tracepatch_out/$NAME.diff
 pause
 
 step 7 "The scientist runs the FIXED script"
 say "Same answer as before, but memory no longer grows with the file."
-echo "${bold}\$ python3 tracepatch_out/safe_pipeline.patched.py $DATA${reset}"
-measure python3 tracepatch_out/safe_pipeline.patched.py "$DATA"; MB2=$PEAK
+echo "${bold}\$ python3 tracepatch_out/$NAME.patched.py $DATA${reset}"
+measure python3 tracepatch_out/$NAME.patched.py "$DATA"; MB2=$PEAK
 echo "${green}${bold}  → peak memory: ${MB2} MB${reset}  (before: ${MB} MB)"
 pause
 
 step 8 "A script that must NOT be fixed: median"
 say "The median of chunk medians is not the median. Chunking would give a WRONG answer silently."
-run sed -n '15,17p' "$UNSAFE"
+FUNC_LINE=$(grep -n "^def " "$UNSAFE" | head -1 | cut -d: -f1)
+run sed -n "${FUNC_LINE},$((FUNC_LINE + 2))p" "$UNSAFE"
 run python3 -m tracepatch run "$UNSAFE" --data "$DATA" --mem-limit-mb $CAP
 echo "${dim}# exit code: $? (2 = refused, nothing was changed)${reset}"
 
