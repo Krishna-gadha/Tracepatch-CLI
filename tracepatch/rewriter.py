@@ -142,7 +142,7 @@ class TemplateRewriter(Rewriter):
         for stmt in after:
             for node in ast.walk(stmt):
                 if isinstance(node, ast.Name) and node.id == df:
-                    raise RewriteError(f"`{df}` is used at line {node.lineno} in a way the template "
+                    raise RewriteError(f"`{df}` is used on line {node.lineno} of {func_name}() in a way the template "
                                        f"cannot rewrite (only {df}[col].sum/count/min/max() and len({df}))")
 
         # Rebuild read_csv(...) with chunksize=CHUNKSIZE added.
@@ -259,12 +259,35 @@ class LLMRewriter(Rewriter):
         return code
 
 
+class TemplateThenLLMRewriter(Rewriter):
+    """Try the free, deterministic template first; only if it cannot handle
+    the function, ask Claude. Either result still has to pass Gate 3."""
+    name = "template+llm"
+
+    def __init__(self, llm: Optional[Rewriter] = None):
+        self.template = TemplateRewriter()
+        self.llm = llm or LLMRewriter()
+        self.used = None  # which one produced the last patch
+
+    def rewrite(self, source_segment, func_name, feedback=None):
+        if feedback is None:  # first attempt: template
+            try:
+                code = self.template.rewrite(source_segment, func_name)
+                self.used = "template"
+                return code
+            except RewriteError:
+                pass  # template can't do it: fall through to the LLM
+        code = self.llm.rewrite(source_segment, func_name, feedback)
+        self.used = "llm"
+        return code
+
+
 def get_rewriter(name: str) -> Rewriter:
-    """'template', 'llm', or 'auto' (LLM if a key is set, else template)."""
+    """'template', 'llm', or 'auto' (template first, then Claude if a key is set)."""
     if name == "template":
         return TemplateRewriter()
     if name == "llm":
         return LLMRewriter()
     if name == "auto":
-        return LLMRewriter() if os.environ.get("ANTHROPIC_API_KEY") else TemplateRewriter()
+        return TemplateThenLLMRewriter() if os.environ.get("ANTHROPIC_API_KEY") else TemplateRewriter()
     raise ValueError(f"unknown rewriter {name!r}")

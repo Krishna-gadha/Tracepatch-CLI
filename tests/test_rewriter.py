@@ -111,7 +111,19 @@ def test_auto_picks_template_without_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert get_rewriter("auto").name == "template"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-test-value")
-    assert get_rewriter("auto").name == "llm"
+    assert get_rewriter("auto").name == "template+llm"
+
+
+def test_template_first_then_llm_only_when_needed():
+    from tracepatch.rewriter import TemplateThenLLMRewriter
+    fake = FakeClient("def f(p):\n    return 1\n")
+    rw = TemplateThenLLMRewriter(llm=LLMRewriter(client=fake))
+    simple = "def f(p):\n    df = pd.read_csv(p)\n    return df['a'].sum()\n"
+    assert "CHUNKSIZE" in rw.rewrite(simple, "f") and rw.used == "template"
+    assert fake.calls == []  # Claude not called for a simple function
+    hard = "def f(p):\n    df = pd.read_csv(p)\n    return (df['a'] == 1).sum()\n"
+    rw.rewrite(hard, "f")
+    assert rw.used == "llm" and len(fake.calls) == 1
 
 
 def test_strip_fences_leaves_plain_code():

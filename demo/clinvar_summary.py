@@ -20,7 +20,7 @@ def clinvar_summary(path):
 
 if __name__ == "__main__":
     variants, submissions, most = clinvar_summary(sys.argv[1])
-    print("Variants:", variants)
+    print("Variant records:", variants)
     print("Lab submissions:", submissions)
-    print("Average submissions per variant:", round(submissions / variants, 2))
-    print("Most submissions for one variant:", most)
+    print("Average submissions per record:", round(submissions / variants, 2))
+    print("Most submissions for one record:", most)

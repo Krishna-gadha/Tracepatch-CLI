@@ -121,7 +121,8 @@ def main() -> int:
     print()
 
     print(_c("1", "Running TracePatch ...\n"))
-    report = run(script, data, cap, chunk_rows=chunk_rows)
+    # Template first; Claude only if the template can't and ANTHROPIC_API_KEY is set.
+    report = run(script, data, cap, rewriter="auto", chunk_rows=chunk_rows)
 
     if report.diff_path and os.path.exists(report.diff_path):
         try:
