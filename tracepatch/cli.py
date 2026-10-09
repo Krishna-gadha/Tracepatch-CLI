@@ -1,6 +1,7 @@
 """Command line entry point.
 
   python -m tracepatch run demo/safe_pipeline.py --data demo/big.csv --mem-limit-mb 300
+  python -m tracepatch          (no arguments: interactive mode, asks for the files)
 
 Exit codes: 0 verified patch (or nothing to fix), 2 refused by Gate 2,
 1 failed.
@@ -13,6 +14,9 @@ from tracepatch.orchestrator import MAX_ATTEMPTS, run
 
 
 def main(argv=None) -> int:
+    if not (sys.argv[1:] if argv is None else argv):
+        from tracepatch.interactive import main as interactive_main
+        return interactive_main()
     p = argparse.ArgumentParser(prog="tracepatch",
                                 description="Find and repair OOM crashes in pandas scripts, "
                                             "accepting a patch only after verifying it.")
