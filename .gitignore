@@ -19,3 +19,6 @@ demo/data/
 
 # TracePatch output (patched scripts and diffs)
 tracepatch_out/
+
+# Web demo uploads and outputs
+demo/uploads/

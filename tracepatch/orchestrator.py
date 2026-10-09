@@ -22,7 +22,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 from tracepatch.gate1_tracer import TraceResult, trace
 from tracepatch.gate2_ast import run_gate2
@@ -44,6 +44,9 @@ class RunReport:
     diff_path: Optional[str] = None
     patched_output: str = ""
     log: List[str] = field(default_factory=list)
+    # Memory samples (seconds, MB) from Gate 1, for charts in the web demo.
+    before_samples: List[Tuple[float, float]] = field(default_factory=list)
+    after_samples: List[Tuple[float, float]] = field(default_factory=list)
 
     @property
     def exit_code(self) -> int:
@@ -113,6 +116,7 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
         f"with a {mem_limit_mb:.0f} MB cap ...")
     t = trace(script, [data], mem_limit_mb, timeout_s)
     report.before_peak_mb = t.peak_mb
+    report.before_samples = _mb_samples(t)
     if t.timed_out:
         return finish("failed", f"the original script ran longer than {timeout_s:.0f}s")
     if not t.killed_by_cap:
@@ -176,6 +180,7 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             full: TraceResult = trace(cand_path, [data], mem_limit_mb, timeout_s,
                                       env=clean_env(), cwd=workdir)
             report.after_peak_mb = full.peak_mb
+            report.after_samples = _mb_samples(full)
 
             if full.killed_by_cap:
                 say(f"[Verify] still spiked: {full.peak_mb:.0f} MB at line {full.peak_line} "
@@ -208,6 +213,10 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
                                 f"(last problem: {feedback})")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _mb_samples(t: TraceResult) -> List[Tuple[float, float]]:
+    return [(s[0], s[1] / (1024 * 1024)) for s in t.samples]
 
 
 def _write_outputs(report: RunReport, script: str, original: str, patched: str, out_dir: str):

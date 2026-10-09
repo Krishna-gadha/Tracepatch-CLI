@@ -58,6 +58,18 @@ Patched scripts and diffs go to `tracepatch_out/`. Exit codes: `0` verified
 Other options: `--rewriter template|llm|auto`, `--max-attempts 1..3`,
 `--sample-rows N`, `--out-dir DIR`, `--timeout SECONDS`.
 
+### Web demo
+
+```bash
+python3 demo/app.py
+```
+
+Then open http://127.0.0.1:8050. Upload a CSV (or generate one), pick the safe or
+unsafe pipeline (or upload your own script that reads `sys.argv[1]`), set the memory
+cap and press **Run**. The five stages light up live, and the page shows a
+before/after memory chart, the diff and a download link for the patched script.
+It calls the same `orchestrator.run()` as the CLI. Local use only.
+
 ### Example run (real output, macOS, Python 3.9)
 
 ```
