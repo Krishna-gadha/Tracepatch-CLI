@@ -11,30 +11,64 @@ Run these once, in the project folder, and check each result:
 cd ~/Desktop/" Tracepatch"
 ```
 ```bash
-ls -lh demo/data/clinvar.tsv demo/big.csv
+ls -lh demo/data/clinvar.tsv
 ```
-Both files must exist (195M and 111M). If `big.csv` is missing: `python3 demo/make_data.py`.
-If `clinvar.tsv` is missing, use the download command in the README (a few minutes).
+The file must exist (195M). If it is missing, use the download command in the
+README (a few minutes).
+
+```bash
+git status --short demo/
+```
+Must print nothing. If `demo/clinvar_summary.py` shows as changed, a practice run
+applied the repair; undo it with `python3 -m tracepatch restore demo/clinvar_summary.py`.
 
 ```bash
 python3 -m pytest
 ```
-Must end with `54 passed`.
+Must end with `63 passed`.
 
-Then do **one full practice run** of the demo below. Also:
+Then do **one full practice run** of the demo below, and `restore` afterwards. Also:
 - make the terminal font large, and run `clear` before you start;
 - close heavy apps, so memory readings are steady;
 - keep this file open on the side.
 
-## The demo (about 6 minutes)
+## The demo (about 7 minutes)
 
 ### 1. Say what it is (20 seconds)
 
-> "Data scripts that load a huge file at once get killed by the operating system,
-> with no error message and no line number. TracePatch finds the line, repairs the
-> script to read the file in pieces, and accepts the repair only after verifying it."
+> "Data scripts that load a huge file at once get killed by the system, with no
+> error message and no line number. TracePatch finds the line, repairs the script to
+> read the file in pieces, and accepts the repair only after verifying it."
 
-### 2. Repair a script on real data
+### 2. The script and its data
+
+```bash
+cat demo/clinvar_summary.py
+```
+
+> "This is an analysis script. The data file is named at the top: ClinVar, NCBI's
+> public database of human genetic variants. 300,000 records, 43 columns, 195 MB.
+> Line 15 loads the whole table into memory, then it counts the records and the
+> lab submissions."
+
+```bash
+python3 demo/clinvar_summary.py
+```
+
+> "On this laptop it runs, because the laptop has 24 GB. It needs 678 MB for a
+> 195 MB file."
+
+### 3. The problem
+
+```bash
+python3 -m tracepatch limit demo/clinvar_summary.py
+```
+
+> "Real analyses run on a shared cluster where every job has a memory limit. With
+> a 500 MB limit the system kills the script. This is everything it reports: no
+> Python error, no line number. The person only knows it died."
+
+### 4. TracePatch
 
 ```bash
 python3 -m tracepatch
@@ -42,54 +76,102 @@ python3 -m tracepatch
 
 | It asks | You do | You say |
 |---|---|---|
-| Upload your dataset | drag `demo/data/clinvar.tsv` in (or type the path), Enter | "This is ClinVar, NCBI's public database of human genetic variants: 300,000 records, 43 columns, 195 MB." |
-| Upload your analysis script | drag `demo/clinvar_summary.py` in, Enter | "This is the analysis script. Line 14 loads the whole file into memory." |
-| Memory limit | just press Enter (500) | "We allow 500 MB, like the memory limit of a cluster job." |
+| Your analysis script | drag `demo/clinvar_summary.py` in (or type the path), Enter | "We give it only the script." |
+| The dataset | nothing: it finds it | "It read the script and found which data file it uses." |
+| Memory limit | just press Enter (500) | "The same 500 MB limit." |
 
 As the lines appear:
 
 | Line on screen | You say |
 |---|---|
-| `[Gate 1] KILLED ... fault at line 14` | "The script went over the limit and was killed. Normally that gives no line number. We record the line every 50 milliseconds, so we know it was line 14." |
+| `[Gate 1] KILLED ... fault at line 15` | "It ran the script and was killed again, but this time we recorded the line every 50 milliseconds, so we know it was line 15." |
 | `[Gate 2] ... -> OK` | "We read the code and check every operation. `len`, `sum` and `max` can be computed piece by piece, so it is safe." |
-| `[Rewrite] ...` | "It rewrites the load to read 25,000 rows at a time." |
+| `[Rewrite] ... (25,000 rows at a time)` | "It rewrites the load to read 25,000 rows at a time. The chunk size is chosen from how wide the rows are." |
 | `[Gate 3] ... outputs match -> OK` | "The old and new code both run on a 5,000-row sample in an isolated process. Same answer." |
 | `[Verify] peak ... MB -> OK` | "The repaired script runs on the whole file with the memory tracer attached. It stays far under the limit." |
-| `VERIFIED PATCH` and the output | "Only now is the repair accepted. And this is the real result: 300,000 records, 1.5 million lab submissions." |
+| `VERIFIED PATCH` and the output | "Only now is the repair accepted. This is the real result: 300,000 records, 1.5 million lab submissions." |
 
-At `Show what was changed? [Y/n]` press Enter:
+- At `Show what was changed? [Y/n]` press **Enter**:
+  > "Red is removed, green is added. One `read_csv` became a loop over chunks, and
+  > the partial results are merged at the end."
+- At `Replace clinvar_summary.py with the repaired version? [y/N]` type **y**, Enter:
+  > "The original is kept as a backup."
 
-> "Red is removed, green is added. One `read_csv` became a loop over chunks, and the
-> partial results are merged at the end."
+### 5. The result
 
-### 3. A more meaningful question (optional, 1 minute)
+```bash
+python3 -m tracepatch limit demo/clinvar_summary.py
+```
 
-Run `python3 -m tracepatch` again with `demo/clinvar_pathogenic.py`.
+> "The same script, under the same 500 MB limit that killed it. It finishes, with
+> the same answer, at about 180 MB."
 
-> "This counts how many records are pathogenic, meaning disease-causing: 115,014 of
-> 300,000. Counting rows that match a condition is also safe to do in pieces."
+Then put the original back, so the next demo starts clean:
 
-### 4. A script that must be refused
+```bash
+python3 -m tracepatch restore demo/clinvar_summary.py
+```
 
-Run `python3 -m tracepatch` again with `demo/clinvar_median.py`.
+### 6. A script that must be refused
+
+```bash
+python3 -m tracepatch run demo/clinvar_median.py
+```
 
 > "This computes a median. The median of the pieces is not the median of the whole
 > file, so chunking would give a wrong answer with no error. Gate 2 refuses, and
-> nothing is changed. Line 12 is where memory blew up; line 13 is why it can't be fixed."
+> nothing is changed. Line 14 is where memory blew up; line 15 is why it can't be fixed."
 
-### 5. The tests
+### 7. The tests
 
 ```bash
 python3 -m pytest
 ```
 
-> "54 automated tests cover every gate, including a patch with a deliberate bug that
+> "63 automated tests cover every gate, including a patch with a deliberate bug that
 > Gate 3 must catch, and a check that the retry loop stops after three attempts."
 
-### 6. If they ask about the LLM
+### 8. Optional: a more meaningful question
 
 ```bash
-python3 -m tracepatch run demo/clinvar_needs_llm.py --data demo/data/clinvar.tsv --mem-limit-mb 500 --chunk-rows 25000
+python3 -m tracepatch run demo/clinvar_pathogenic.py
+```
+
+> "This counts how many records are pathogenic, meaning disease-causing: 115,014 of
+> 300,000. Counting rows that match a condition is also safe to do in pieces."
+
+## The LLM
+
+### Setting it up (do this before the review, not during it)
+
+1. Go to **console.anthropic.com**, sign in, and add a small amount of credit under Billing.
+2. Under **API keys**, create a key and copy it.
+3. In the **same terminal** you will run TracePatch from, type this with your key
+   (it lasts until you close that terminal; never put the key in a file or in git):
+   ```bash
+   export ANTHROPIC_API_KEY=paste-your-key-here
+   ```
+4. Run the script the offline template cannot repair:
+   ```bash
+   python3 -m tracepatch run demo/clinvar_needs_llm.py --rewriter auto
+   ```
+5. Look for `[Rewrite] llm rewriter produced ...`, then Gate 3 and Verify.
+
+**This has never been run live.** Do it tonight or early tomorrow, and keep the
+output. Three outcomes are possible, and all three are fine to show:
+- **Verified**: Claude's rewrite passed every gate.
+- **Rejected, then verified**: a gate rejected the first rewrite, the reason was
+  sent back, and the next attempt passed. This is the best demonstration of why
+  the gates exist.
+- **Failed after 3 attempts**: the tool refused to accept unverified code.
+
+If it prints a "Claude API error", copy the message; it usually means the key
+or the credit is not set up.
+
+### If you have no key
+
+```bash
+python3 -m tracepatch run demo/clinvar_needs_llm.py
 ```
 
 > "This script filters rows and then sums. Gate 2 says it is safe, but our offline
@@ -106,43 +188,48 @@ python3 -m tracepatch run demo/clinvar_needs_llm.py --data demo/data/clinvar.tsv
 | Memory to load it all at once | 678 MB (measured by macOS) |
 | Memory after the repair | about 180 MB |
 | Memory limit in the demo | 500 MB |
-| Rows per chunk (ClinVar) | 25,000 |
+| Rows per chunk (ClinVar) | 25,000 (about 16 MB of file per chunk) |
 | Sample for Gate 3 | first 5,000 rows, split into 5 chunks |
 | Line sampling / cap check | every 50 ms / every 10 ms |
 | Number tolerance | relative 1e-5, absolute 1e-8 |
 | Retry cap | 3 attempts |
 | Allowlist | 8 methods + 6 builtins |
-| Tests | 54 |
-| Exit codes | 0 verified, 2 refused, 1 failed |
+| Tests | 63 |
+| Exit codes | 0 verified, 2 refused, 1 failed, 137 killed by `limit` |
 
 ## If something goes wrong
 
 | Problem | What to do |
 |---|---|
-| Dragging a file doesn't paste the path | Type it: `demo/data/clinvar.tsv`, `demo/clinvar_summary.py` |
-| "File not found" | Check you are in the project folder: `pwd` should end in ` Tracepatch` |
-| `NO_PROBLEM: ... stayed under the cap` | The limit was too high for that file. Use 500 for ClinVar, 300 for `big.csv` |
-| Interactive mode misbehaves | Use one command: `python3 -m tracepatch run demo/clinvar_summary.py --data demo/data/clinvar.tsv --mem-limit-mb 500 --chunk-rows 25000` |
-| `clinvar.tsv` is missing or broken | Use the synthetic data: `python3 demo/make_data.py`, then `python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv --mem-limit-mb 300` and the same with `demo/unsafe_pipeline.py` |
+| Dragging a file doesn't paste the path | Type it: `demo/clinvar_summary.py` |
+| "File not found" or "data file not found" | You must be in the project folder: `pwd` should end in ` Tracepatch` |
+| `NO_PROBLEM: ... stayed under the cap` | The script is already repaired. Run `python3 -m tracepatch restore demo/clinvar_summary.py` |
+| `limit` finishes instead of being killed | Same cause: `restore` the script |
+| Interactive mode misbehaves | Use one command: `python3 -m tracepatch run demo/clinvar_summary.py` |
+| `clinvar.tsv` is missing or broken | Use the synthetic data: `python3 demo/make_data.py`, then `python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv` and the same with `demo/unsafe_pipeline.py` |
 | A run fails unexpectedly | Run it once more (memory readings vary a little), then use the synthetic data |
 
-## The ten most likely questions
+## The twelve most likely questions
 
 1. **What is new here?** Not chunking, but the checks around it: a rewrite is accepted only after the safety check, the sample comparison and the full-scale memory check all pass.
-2. **How do you find the line with no traceback?** A thread writes the current line and memory to a file every 50 ms and flushes it, so the record survives the kill.
-3. **Why refuse the median?** The median of chunk medians is not the median: `[1,2,3]` and `[4,100]` give 27 instead of 3.
-4. **Why an allowlist?** A blocklist allows anything it forgot; an allowlist refuses anything it doesn't know. Wrong "safe" answers are silent, so we fail safe.
-5. **Why a tolerance for numbers?** Chunking changes the order of additions, and `(0.1+0.2)+0.3` is not exactly `0.1+(0.2+0.3)`.
-6. **Does passing the sample prove it works on the full file?** No. That is why the full-scale check exists. On our first ClinVar run it caught a patch that still used over 600 MB.
-7. **Your laptop has 24 GB. Why does it crash?** The cap simulates a cluster job's memory limit. Without the cap this script needs 678 MB; bigger files need far more.
-8. **Where is the AI?** The LLM rewriter, and making LLM-written code trustworthy by verifying it. The gates themselves are program analysis and testing.
-9. **Have you run the LLM?** Not live. It is implemented and tested with a mock; the verified demo uses the offline template.
-10. **What are the limits?** Small allowlist, simple template patterns, sample-based checking, data path must be an argument, CSV/TSV only, macOS only, process-level sandbox.
+2. **Is this a real problem?** Yes. Clusters kill jobs that exceed their memory limit (Slurm calls it an "oom-kill event"), and Nextflow's documented recipe is to retry with more memory on exit status 137.
+3. **How do people solve it today?** Mostly by asking for more memory and re-running; or rewriting by hand; or switching to Dask, Polars or DuckDB. None of these checks that the answer stayed the same.
+4. **Would scientists use this as it is?** No. It is a prototype that repairs a small set of patterns. It demonstrates the method: verify an automatic repair before trusting it.
+5. **How do you find the line with no traceback?** A thread writes the current line and memory to a file every 50 ms and flushes it, so the record survives the kill.
+6. **Why refuse the median?** The median of chunk medians is not the median: `[1,2,3]` and `[4,100]` give 27 instead of 3.
+7. **Why an allowlist?** A blocklist allows anything it forgot; an allowlist refuses anything it doesn't know. Wrong "safe" answers are silent, so we fail safe.
+8. **Why a tolerance for numbers?** Chunking changes the order of additions, and `(0.1+0.2)+0.3` is not exactly `0.1+(0.2+0.3)`.
+9. **Does passing the sample prove it works on the full file?** No. That is why the full-scale check exists. On our first ClinVar run it caught a patch that still used over 600 MB.
+10. **Your laptop has 24 GB. Is the crash real?** The limit is simulated by our watchdog, the way a cluster scheduler enforces a job's limit. Without it this script needs 678 MB; bigger files need far more.
+11. **Where is the AI?** The LLM rewriter, and making LLM-written code trustworthy by verifying it. The gates themselves are program analysis and testing.
+12. **What are the limits?** Small allowlist, simple template patterns, sample-based checking, loading must be inside a function, CSV/TSV only, macOS only, process-level sandbox.
 
-More questions with answers: LEARNING_GUIDE.md, section 18.
+More questions with answers: LEARNING_GUIDE.md, section 18. Real-world context
+and sources: section 21.
 
 ## Say these plainly if asked
 
+- We did not survey scientists. What we know about real use comes from public documentation (Slurm, Nextflow, pandas), listed in section 21 of the guide.
 - The demo scripts are simple on purpose. The project is the repair and its verification, not the analysis.
 - It makes no biological claims. ClinVar is used as a real, large table.
 - The full-scale check proves the repaired script fits in memory. Correctness comes from the sample comparison.

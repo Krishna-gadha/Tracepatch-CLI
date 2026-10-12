@@ -3,6 +3,7 @@
   python -m tracepatch                              interactive mode: asks for the script
   python -m tracepatch run SCRIPT                   find, repair and verify
   python -m tracepatch limit SCRIPT                 just run SCRIPT under a memory limit
+  python -m tracepatch restore SCRIPT               undo --apply (bring back SCRIPT.orig)
 
 Exit codes: 0 verified patch (or nothing to fix), 2 refused by Gate 2,
 1 failed.
@@ -10,6 +11,9 @@ Exit codes: 0 verified patch (or nothing to fix), 2 refused by Gate 2,
 
 import argparse
 import sys
+
+import os
+import shutil
 
 from tracepatch.orchestrator import MAX_ATTEMPTS, run
 from tracepatch.watchdog import run_watched
@@ -65,10 +69,20 @@ def main(argv=None) -> int:
     m.add_argument("script")
     m.add_argument("script_args", nargs="*")
     m.add_argument("--mem-limit-mb", type=float, default=DEFAULT_CAP_MB)
+    u = sub.add_parser("restore", help="undo --apply: bring back SCRIPT.orig")
+    u.add_argument("script")
     a = p.parse_args(argv)
 
     if a.command == "limit":
         return limit(a.script, a.script_args, a.mem_limit_mb)
+    if a.command == "restore":
+        backup = a.script + ".orig"
+        if not os.path.isfile(backup):
+            print(f"Nothing to restore: {backup} does not exist.")
+            return 1
+        shutil.move(backup, a.script)
+        print(f"Restored {a.script} from {os.path.basename(backup)}.")
+        return 0
     report = run(a.script, a.data, a.mem_limit_mb, a.rewriter, a.max_attempts,
                  a.sample_rows, a.out_dir, a.timeout, chunk_rows=a.chunk_rows, apply=a.apply)
     return report.exit_code

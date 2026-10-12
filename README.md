@@ -48,15 +48,18 @@ pip install -r requirements.txt
 python3 -m pytest
 ```
 
-### Interactive mode
+### Commands
 
-```bash
-python3 -m tracepatch
-```
+| Command | What it does |
+|---|---|
+| `python3 -m tracepatch` | interactive mode: asks for the script, finds its data file, repairs and verifies |
+| `python3 -m tracepatch run SCRIPT` | the same in one command |
+| `python3 -m tracepatch limit SCRIPT` | only run SCRIPT under a memory limit, as a cluster job would (no repair) |
+| `python3 -m tracepatch restore SCRIPT` | undo `--apply` |
 
-It asks for the dataset and the analysis script (drag a file into the terminal to
-paste its path) and the memory limit, then runs every stage and offers to show
-the diff. The chunk size is picked from how wide the rows are.
+TracePatch reads the data file's path **from the script** (written in the
+`read_csv` call or as a constant at the top). If the script takes the file as
+`sys.argv[1]` instead, pass it with `--data FILE`.
 
 ### Real data: ClinVar (NCBI)
 
@@ -68,6 +71,15 @@ mkdir -p demo/data
 curl -s https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz | gunzip -c | head -n 300001 > demo/data/clinvar.tsv
 ```
 
+The full story in three commands:
+
+```bash
+python3 -m tracepatch limit demo/clinvar_summary.py        # killed at 500 MB: exit 137, no traceback
+python3 -m tracepatch run demo/clinvar_summary.py --apply  # found, repaired, verified, applied
+python3 -m tracepatch limit demo/clinvar_summary.py        # finishes at about 180 MB, same answer
+python3 -m tracepatch restore demo/clinvar_summary.py      # put the original back
+```
+
 | Script | Computes | Result |
 |---|---|---|
 | `demo/clinvar_summary.py` | records, lab submissions, average and max per record | **verified**: 678 MB → about 180 MB |
@@ -75,33 +87,28 @@ curl -s https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.t
 | `demo/clinvar_median.py` | median submissions | **refused** by Gate 2 |
 | `demo/clinvar_needs_llm.py` | filter rows, then sum | template can't; needs the LLM rewriter |
 
-```bash
-python3 -m tracepatch run demo/clinvar_summary.py --data demo/data/clinvar.tsv --mem-limit-mb 500 --chunk-rows 25000
-python3 -m tracepatch run demo/clinvar_median.py  --data demo/data/clinvar.tsv --mem-limit-mb 500
-```
-
 ### Synthetic data (no download)
 
 ```bash
 python3 demo/make_data.py
-python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv --mem-limit-mb 300
-python3 -m tracepatch run demo/unsafe_pipeline.py --data demo/big.csv --mem-limit-mb 300
+python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv
+python3 -m tracepatch run demo/unsafe_pipeline.py --data demo/big.csv
 ```
 
-`demo/make_data.py` writes 4,000,000 rows (~116 MB) to `demo/big.csv`.
+`demo/make_data.py` writes 4,000,000 rows (~116 MB) to `demo/big.csv`. These two
+scripts take the data file as an argument.
 
 ### Options and outputs
 
 Patched scripts and diffs go to `tracepatch_out/`. Exit codes: `0` verified
 (or nothing to fix), `2` refused by Gate 2, `1` failed.
 
-Options of `run`: `--mem-limit-mb N`, `--chunk-rows N` (default 100000; fewer for
-wide tables), `--rewriter template|llm|auto` (`auto` = template first, then Claude
-if `ANTHROPIC_API_KEY` is set), `--max-attempts 1..3`, `--sample-rows N`,
-`--out-dir DIR`, `--timeout SECONDS`.
+Options of `run`: `--data FILE`, `--mem-limit-mb N` (default 500), `--apply`,
+`--chunk-rows N` (default: chosen from how wide the rows are), `--rewriter
+template|llm|auto` (`auto` = template first, then Claude if `ANTHROPIC_API_KEY`
+is set), `--max-attempts 1..3`, `--sample-rows N`, `--out-dir DIR`, `--timeout SECONDS`.
 
-The target script must take the data path as `sys.argv[1]` and load the data
-inside a function.
+The `read_csv` must be inside a function.
 
 ### Optional: web page
 
@@ -117,18 +124,20 @@ It calls the same `orchestrator.run()` as the CLI. Local use only.
 
 ### Example run on synthetic data (real output, macOS, Python 3.9)
 
+`python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv --mem-limit-mb 300`
+
 ```
-[Gate 1] tracing safe_pipeline.py on big.csv with a 300 MB cap ...
-[Gate 1] KILLED at 346 MB (simulated exit 137); fault at line 17 in depth_summary()
+[Gate 1] running safe_pipeline.py on big.csv with a 300 MB memory cap ...
+[Gate 1] KILLED at 340 MB (simulated exit 137); fault at line 17 in depth_summary()
     17 |     df = pd.read_csv(path)
 --- attempt 1/3 ---
 [Gate 2] depth_summary(): every call is on the chunk-safe allowlist -> OK
-[Rewrite] template rewriter produced a chunked depth_summary()
+[Rewrite] template rewriter produced a chunked depth_summary() (100,000 rows at a time)
 [Gate 3] sandbox on a 5,000-row sample: outputs match -> OK
 [Verify] full-scale run of the patched script, tracer attached, 300 MB cap ...
 [Verify] peak 116 MB, under the 300 MB cap -> OK
 VERIFIED PATCH: tracepatch_out/safe_pipeline.patched.py
-  memory before: killed at the 300 MB cap (reached 346 MB)
+  memory before: killed at the 300 MB cap (reached 340 MB)
   memory after:  116 MB peak on the full file
   diff:          tracepatch_out/safe_pipeline.diff
   output:        sites=4000000, called=3959902, total_depth=237605570.000, mean_depth=60.003, min_depth=1.000, max_depth=119.000
@@ -148,12 +157,13 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - [x] Gate 3: tolerance-based oracle + subprocess sandbox
 - [x] `TemplateRewriter`: sum / count / min / max / len, and counting rows that match a condition
 - [x] Orchestrator with full-scale verification loop (max 3 attempts)
-- [x] CLI: command mode and interactive mode
+- [x] CLI: `run`, interactive mode, `limit`, `--apply` / `restore`
+- [x] Data file read from the script itself (path in the call, a top-level constant, or an argument)
 - [x] Demo on real ClinVar data: two scripts verified, median refused
 - [x] Demo on synthetic data: `safe_pipeline.py` verified, `unsafe_pipeline.py` refused
-- [x] Test suite (`python3 -m pytest`): 54 tests passing
+- [x] Test suite (`python3 -m pytest`): 63 tests passing
 - [ ] `LLMRewriter` against the real API: implemented (with a template-first fallback), but only tested with a fake client. **No live Claude call has been made yet.**
-- [ ] Scripts with the data path written inside the code: not supported
+- [ ] Code outside a function (top-level `read_csv`): refused, not repaired
 - [ ] Tested on Linux / Windows: only run on macOS so far (the code avoids Unix-only modules)
 - [ ] Real genomics formats (VCF/BAM): not supported; CSV/TSV only
 
@@ -169,30 +179,34 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
   first N rows (not a random sample). The full-scale run proves the patch fits in
   memory, but its output cannot be compared with the original, because the original
   never finishes.
-- **The chunk size is a setting**, chosen from the row width in interactive mode
-  and by `--chunk-rows` otherwise. If it is too large, the full-scale check
+- **The chunk size is estimated from the row width** (about 16 MB of file per
+  chunk), not tuned from the memory cap. If it is too large, the full-scale check
   rejects the patch (this happened on ClinVar's 43-column rows with 100,000-row chunks).
+- **This is a prototype of a method, not a tool in use.** We did not survey
+  users. `docs/LEARNING_GUIDE.md` section 21 describes, with sources, how the
+  problem is handled in practice today.
 - **The sandbox isolates processes; it is not a security boundary.** Code in it can
   still read files and use the network.
 - **Memory sampling:** the watchdog polls every 10 ms and the line sampler every
   50 ms. A very fast allocator can overshoot the cap, or hit it before any line
   is recorded (reported as "unknown line", not guessed).
-- Only `read_csv` / `read_table` are rewritten, and only inside a function that
-  takes the data path as an argument.
+- Only `read_csv` / `read_table` are rewritten, and only inside a function. The
+  data path must be simple: in the call, a top-level constant, or an argument.
 - The demo scripts are simple on purpose; they stand for the first step of a pipeline.
 - `anthropic` 1.x needs Python ≥ 3.10; on 3.9 pip installs 0.x (checked against 0.125).
 
 ## Layout
 
 ```
-tracepatch/   cli.py  interactive.py  orchestrator.py  gate1_tracer.py  _trace_child.py
-              gate2_ast.py  rewriter.py  gate3_sandbox.py  _sandbox_child.py
-              gate3_oracle.py  watchdog.py
+tracepatch/   cli.py  interactive.py  orchestrator.py  dataref.py  gate1_tracer.py
+              _trace_child.py  gate2_ast.py  rewriter.py  gate3_sandbox.py
+              _sandbox_child.py  gate3_oracle.py  watchdog.py
 demo/         clinvar_summary.py  clinvar_pathogenic.py  clinvar_median.py  clinvar_needs_llm.py
               make_data.py  safe_pipeline.py  unsafe_pipeline.py
               terminal_demo.sh  app.py  web/        (optional walkthrough and web page)
 tests/        test_gate2.py  test_tracer.py  test_oracle.py  test_sandbox.py  test_rewriter.py
-              test_orchestrator.py  test_interactive.py  test_end_to_end.py  fixtures/
+              test_orchestrator.py  test_script_only.py  test_interactive.py
+              test_end_to_end.py  fixtures/
 docs/         LEARNING_GUIDE.md (everything explained from scratch)  DEMO_RUNBOOK.md
 CONTRACT.md   interface between the two halves of the project
 ```

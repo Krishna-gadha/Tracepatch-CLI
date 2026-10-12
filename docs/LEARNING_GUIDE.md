@@ -29,6 +29,7 @@ type and what to say, in order.
 18. [Viva questions and answers](#18-viva-questions-and-answers)
 19. [Glossary](#19-glossary)
 20. [Command cheat sheet](#20-command-cheat-sheet)
+21. [Real-world context: who has this problem?](#21-real-world-context-who-has-this-problem)
 
 ---
 
@@ -272,7 +273,8 @@ tracepatch/             the tool itself (a Python package)
   __init__.py           marks the folder as a package (empty)
   __main__.py           makes `python -m tracepatch` work; calls cli.main()
   cli.py                command-line arguments → orchestrator.run()
-  interactive.py        interactive mode: asks for the dataset and the script
+  interactive.py        interactive mode: asks for the script, finds its dataset
+  dataref.py            finds which data file a function loads (from the code)
   orchestrator.py       runs every stage in order; retry loop; writes the patch
   gate1_tracer.py       Gate 1, parent side: starts the script, reads samples
   _trace_child.py       Gate 1, child side: runs the script + samples line/RSS
@@ -295,7 +297,7 @@ demo/
   terminal_demo.sh      optional narrated step-by-step walkthrough
   app.py, web/          optional local web page over the same pipeline
 
-tests/                  54 automated tests (see section 13)
+tests/                  63 automated tests (see section 13)
   fixtures/             small scripts the tests run
 
 docs/LEARNING_GUIDE.md  this file
@@ -668,6 +670,22 @@ What `run_in_sandbox()` does for each run:
 inside can still read files or use the network. Real isolation would need
 Docker or similar, which is out of scope.
 
+**Pointing the function at the sample.** The function under test normally reads
+the *full* data file. In the sandbox it must read the 5,000-row **sample**
+instead. `tracepatch/dataref.py` (`find_data_ref`) reads the code and works out
+how the function gets its file, and the sandbox handles each case:
+
+| How the script names its data | Example | What the sandbox does |
+|---|---|---|
+| a constant at the top | `DATA_FILE = "clinvar.tsv"` … `pd.read_csv(DATA_FILE)` | sets `DATA_FILE` to the sample's path |
+| written in the call | `pd.read_csv("clinvar.tsv")` | swaps that text for a variable holding the sample's path |
+| passed in | `def f(path): pd.read_csv(path)` | calls `f(sample_path)` |
+
+If a rewritten function no longer reads the same file as the original, Gate 3
+rejects it ("code does not read the data file … that the original reads").
+`extract_imports()` also copies simple constants from the top of the script, so
+names like `DATA_FILE` exist inside the sandbox.
+
 ---
 
 ## 9. The watchdog (shared by Gate 1 and Gate 3)
@@ -735,9 +753,25 @@ Correctness comes from Gate 3 on the sample.
 - `<name>.patched.py` is the fixed script;
 - `<name>.diff` is a unified diff, original vs patched.
 
-**Chunk size.** `run(..., chunk_rows=100_000)` sets `CHUNKSIZE` in the patched
-script. The command mode exposes it as `--chunk-rows`; the interactive mode
-picks it automatically from the row width (section 11.1).
+**Which data file.** After Gate 2 has identified the function, the orchestrator
+asks `find_data_ref()` which file it loads. If the path is written in the script,
+it prints `[Data] clinvar_summary() reads demo/data/clinvar.tsv (path written in
+the script)` and takes the sample from that file. If the function takes the path
+as an argument, the file must be given with `--data`.
+
+**Chunk size.** By default `auto_chunk_rows()` chooses it from how wide the rows
+are: about **16 MB of file per chunk**, rounded to the nearest 5,000 rows and
+kept between 10,000 and 100,000. The width is measured on the Gate 3 sample.
+`--chunk-rows N` overrides it.
+
+| Dataset | Bytes per row | Rows per chunk |
+|---|---|---|
+| ClinVar (43 text columns) | about 680 | **25,000** |
+| Synthetic `big.csv` (6 short columns) | about 29 | **100,000** (the maximum) |
+
+**Applying the repair.** With `--apply` (or by answering yes in interactive
+mode), `apply_patch()` copies the original to `<script>.orig` and writes the
+verified patch over the script. `python3 -m tracepatch restore <script>` undoes it.
 
 **A script that fails for an ordinary reason.** If the original script crashes
 without hitting the memory cap (wrong dataset, missing column, typo), TracePatch
@@ -754,26 +788,45 @@ FAILED: the script itself failed before any memory problem (exit 1): pandas.erro
 
 **Files:** `tracepatch/cli.py`, `tracepatch/interactive.py`, `tracepatch/__main__.py`
 
-There are two ways to run TracePatch. Both end up calling the same
-`orchestrator.run()`.
+| Command | What it does |
+|---|---|
+| `python3 -m tracepatch` | interactive mode: asks for the script, then repairs it |
+| `python3 -m tracepatch run SCRIPT` | find, repair and verify in one command |
+| `python3 -m tracepatch limit SCRIPT` | only run SCRIPT under a memory limit (no repair) |
+| `python3 -m tracepatch restore SCRIPT` | undo `--apply` (bring back `SCRIPT.orig`) |
 
-### 11.1 Interactive mode (used in the demo)
+### 11.1 `limit`: what the user sees without TracePatch
+
+```
+$ python3 -m tracepatch limit demo/clinvar_summary.py
+Killed: the script used more than 500 MB of memory (exit code 137).
+No Python error and no line number: this is all the system reports.
+```
+
+It runs the script through the same watchdog with **no tracing and no repair**.
+This is what a memory-limited cluster job looks like to the person who ran it.
+If the script fits, it prints the script's own output and the peak memory.
+
+### 11.2 Interactive mode (used in the demo)
 
 ```bash
 python3 -m tracepatch
 ```
 
-With **no arguments**, `cli.main()` hands over to `interactive.main()`, which asks
-three things:
+With **no arguments**, `cli.main()` hands over to `interactive.main()`:
 
-1. **"Upload your dataset"**: you drag the data file into the terminal (the
-   terminal pastes its path) and press Enter. `describe_dataset()` then reports
-   the size, the number of rows and the number of columns. It reads the file
-   **line by line**, so it never loads it into memory.
-2. **"Upload your analysis script"**: you drag the `.py` file in.
-   `describe_script()` parses it with `ast` and reports the function that calls
-   `read_csv` and the line it is on.
+1. **"Your analysis script"**: you drag the `.py` file into the terminal (the
+   terminal pastes its path) and press Enter. `describe_script()` parses it with
+   `ast` and reports the function that calls `read_csv` and the line it is on.
+2. **"The dataset"**: `find_data_ref()` reads the script. If the data file's
+   path is written inside the script, that file is used and nothing is asked.
+   Otherwise it asks you to drag the data file in. `describe_dataset()` then
+   reports its size, rows and columns, reading **line by line** (it never loads
+   the file).
 3. **"Memory limit"**: press Enter for the default (500 MB).
+
+Then it runs the pipeline, offers to show the diff, and offers to replace the
+script with the repaired version (keeping `SCRIPT.orig`).
 
 Small helpers, each a few lines:
 
@@ -781,49 +834,35 @@ Small helpers, each a few lines:
 |---|---|
 | `clean_path()` | Turns a dragged-in path into a normal one. Terminals paste it quoted (`'/a b/c.csv'`) or with escaped spaces (`/a\ b/c.csv`); `shlex.split` handles both. |
 | `ask_file()` | Keeps asking until the file exists and has the right extension. |
-| `auto_chunk_rows()` | Picks rows per chunk from how wide the rows are (see below). |
 | `show_diff()` | Prints the diff in colour: red = removed, green = added. |
 
-**How the chunk size is chosen.** `auto_chunk_rows()` aims for about **16 MB of
-file per chunk**: `rows = 16 MB ÷ (file size ÷ number of rows)`, rounded to the
-nearest 5,000 and kept between 10,000 and 100,000.
-
-| Dataset | Bytes per row | Rows per chunk |
-|---|---|---|
-| ClinVar (43 text columns) | about 680 | **25,000** |
-| Synthetic `big.csv` (6 short columns) | about 29 | **100,000** (the maximum) |
-
-Wide rows need fewer rows per chunk; otherwise one chunk alone is too big (this
-really happened, see section 14).
-
-**"Uploading" does not load the data.** TracePatch only needs to know *which*
-file the script works on, so it can run the script the way you would
-(`python3 script.py data.tsv`), take a 5,000-row sample for Gate 3, and re-run
-the repaired script on the full file. The script itself still loads the data, at
-its `read_csv` line.
+**TracePatch never loads the data itself.** It only needs to know *which* file
+the script works on, so it can take a 5,000-row sample for Gate 3. The script
+loads the data, at its `read_csv` line.
 
 Interactive mode uses `rewriter="auto"`: the template first, and Claude only if
 the template can't handle the function **and** `ANTHROPIC_API_KEY` is set.
 
-### 11.2 Command mode
+### 11.3 `run`: one command
 
 ```bash
-python3 -m tracepatch run SCRIPT --data FILE [options]
+python3 -m tracepatch run SCRIPT [options]
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--data` | (required) | the big input file; passed to your script as `sys.argv[1]` |
-| `--mem-limit-mb` | 300 | memory cap enforced by the watchdog |
+| `--data FILE` | none | only needed when the script takes its data file as `sys.argv[1]`; not needed when the path is written in the script |
+| `--mem-limit-mb` | 500 | memory cap enforced by the watchdog |
 | `--rewriter` | template | `template`, `llm`, or `auto` (template first, then Claude) |
-| `--chunk-rows` | 100000 | rows per chunk in the patched script; use fewer for wide tables |
+| `--chunk-rows` | chosen from the row width | rows per chunk in the patched script |
+| `--apply` | off | replace SCRIPT with the verified patch (original kept as `SCRIPT.orig`) |
 | `--max-attempts` | 3 | 1, 2 or 3 only; the cap cannot be raised |
 | `--sample-rows` | 5000 | sample size for Gate 3 |
 | `--out-dir` | tracepatch_out | where the patch and diff go |
 | `--timeout` | 600 | seconds per script run |
 
-**Requirement:** the target script must read its data path from `sys.argv[1]`
-and do the loading **inside a function** that takes the path as its argument.
+**Requirement:** the `read_csv` must be **inside a function**. Code at the top
+level of a script (outside any function) is refused by Gate 2.
 
 ---
 
@@ -860,7 +899,17 @@ curl -s https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.t
 ### 12.2 The four scripts
 
 Each is a small analysis script of the kind a lab runs on every new ClinVar
-release. All four load the whole table with `pd.read_csv(path, sep="\t")`.
+release. Each has the data file written at the top, as a user would:
+
+```python
+DATA_FILE = "demo/data/clinvar.tsv"
+
+def clinvar_summary():
+    df = pd.read_csv(DATA_FILE, sep="\t")      # loads the WHOLE table
+    ...
+```
+
+You run them from the project folder with no arguments: `python3 demo/clinvar_summary.py`.
 
 | Script | What it computes | What TracePatch does | Why |
 |---|---|---|---|
@@ -900,21 +949,31 @@ really crash here. But analyses usually run on a **shared computing cluster**,
 where every job is given a fixed memory limit and the cluster **kills the job**
 if it goes over. Our cap (500 MB) simulates that limit.
 
-### 12.4 The interactive run
+### 12.4 The full story, in three commands
+
+**1. The problem.** Run the script the way a 500 MB cluster job would:
+
+```
+$ python3 -m tracepatch limit demo/clinvar_summary.py
+Killed: the script used more than 500 MB of memory (exit code 137).
+No Python error and no line number: this is all the system reports.
+```
+
+**2. TracePatch.** Give it only the script:
 
 ```
 $ python3 -m tracepatch
 
 TracePatch — find an out-of-memory crash, repair it, verify the repair
 
-1. Upload your dataset
-   Drag the data file here and press Enter: demo/data/clinvar.tsv
-   ✓ clinvar.tsv: 195 MB, 300,000 rows, 43 columns
-
-2. Upload your analysis script
+1. Your analysis script
    Drag the .py file here and press Enter: demo/clinvar_summary.py
-   ✓ clinvar_summary.py: clinvar_summary() loads the data at line 14
-       14 | df = pd.read_csv(path, sep="\t")
+   ✓ clinvar_summary.py: clinvar_summary() loads the data at line 15
+       15 | df = pd.read_csv(DATA_FILE, sep="\t")
+
+2. The dataset
+   The script reads demo/data/clinvar.tsv (path written in the script)
+   ✓ clinvar.tsv: 195 MB, 300,000 rows, 43 columns
 
 3. Memory limit
    Memory available to the script in MB [500]:
@@ -923,23 +982,24 @@ Running TracePatch ...
 ```
 
 ```
-[Gate 1] tracing clinvar_summary.py on clinvar.tsv with a 500 MB cap ...
-[Gate 1] KILLED at 536 MB (simulated exit 137); fault at line 14 in clinvar_summary()
-    14 |     df = pd.read_csv(path, sep="\t")
+[Gate 1] running clinvar_summary.py with a 500 MB memory cap ...
+[Gate 1] KILLED at 549 MB (simulated exit 137); fault at line 15 in clinvar_summary()
+    15 |     df = pd.read_csv(DATA_FILE, sep="\t")
 ```
 TracePatch ran the script. Memory passed 500 MB, so the watchdog killed it. The
-last recorded sample was on line 14, the `read_csv`. (The exact MB varies a
+last recorded sample was on line 15, the `read_csv`. (The exact MB varies a
 little between runs, because the watchdog checks every 10 ms.)
 
 ```
 --- attempt 1/3 ---
 [Gate 2] clinvar_summary(): every call is on the chunk-safe allowlist -> OK
+[Data]   clinvar_summary() reads demo/data/clinvar.tsv (path written in the script)
 ```
 The calls in the function are `read_csv` (the loader), `len`, `sum` and `max`.
-All are allowed.
+All are allowed. TracePatch then reads from the code which file the function loads.
 
 ```
-[Rewrite] template rewriter produced a chunked clinvar_summary()
+[Rewrite] template rewriter produced a chunked clinvar_summary() (25,000 rows at a time)
 [Gate 3] sandbox on a 5,000-row sample: outputs match -> OK
 ```
 The original and the rewritten function both ran on the first 5,000 rows (the
@@ -947,10 +1007,10 @@ rewritten one in 5 chunks of 1,000). The oracle found the same result.
 
 ```
 [Verify] full-scale run of the patched script, tracer attached, 500 MB cap ...
-[Verify] peak 185 MB, under the 500 MB cap -> OK
+[Verify] peak 177 MB, under the 500 MB cap -> OK
 VERIFIED PATCH: tracepatch_out/clinvar_summary.patched.py
-  memory before: killed at the 500 MB cap (reached 536 MB)
-  memory after:  185 MB peak on the full file
+  memory before: killed at the 500 MB cap (reached 549 MB)
+  memory after:  177 MB peak on the full file
   diff:          tracepatch_out/clinvar_summary.diff
   output:        Variant records: 300000
                  Lab submissions: 1522160
@@ -959,24 +1019,37 @@ VERIFIED PATCH: tracepatch_out/clinvar_summary.patched.py
 ```
 The whole repaired script ran on all 300,000 rows and stayed at about 180 MB.
 
-**"memory before" is a lower bound.** 536 MB is only where we *stopped* the
+**"memory before" is a lower bound.** 549 MB is only where we *stopped* the
 script. With no cap it needs 678 MB (measured by macOS with `/usr/bin/time -l`).
 
-Then `Show what was changed? [Y/n]` prints the diff: `read_csv(path, sep="\t")`
-became a loop over `read_csv(path, sep='\t', chunksize=CHUNKSIZE)` with
-`CHUNKSIZE = 25_000`.
+It then asks `Show what was changed? [Y/n]` (the diff: one `read_csv` became a
+loop over `read_csv(DATA_FILE, sep='\t', chunksize=CHUNKSIZE)` with
+`CHUNKSIZE = 25_000`) and `Replace clinvar_summary.py with the repaired version? [y/N]`.
 
-**The refusal.** Run `python3 -m tracepatch` again with `demo/clinvar_median.py`:
+**3. The result.** After answering yes, the same script under the same limit:
 
 ```
-[Gate 1] KILLED at 563 MB (simulated exit 137); fault at line 12 in median_submissions()
-    12 |     df = pd.read_csv(path, sep="\t")
+$ python3 -m tracepatch limit demo/clinvar_summary.py
+Variant records: 300000
+Lab submissions: 1522160
+Average submissions per record: 5.07
+Most submissions for one record: 95
+[finished: exit code 0, peak memory 181 MB, limit 500 MB]
+```
+
+`python3 -m tracepatch restore demo/clinvar_summary.py` puts the original back.
+
+**The refusal.** `python3 -m tracepatch run demo/clinvar_median.py`:
+
+```
+[Gate 1] KILLED at 554 MB (simulated exit 137); fault at line 14 in median_submissions()
+    14 |     df = pd.read_csv(DATA_FILE, sep="\t")
 --- attempt 1/3 ---
-[Gate 2] REFUSED: non-decomposable op: median() at line 13
-REFUSED: non-decomposable op: median() at line 13; nothing was rewritten
+[Gate 2] REFUSED: non-decomposable op: median() at line 15
+REFUSED: non-decomposable op: median() at line 15; nothing was rewritten
 ```
-- **Line 12** is *where* memory blew up (Gate 1).
-- **Line 13** is *why* it can't be fixed (Gate 2 found `.median()`).
+- **Line 14** is *where* memory blew up (Gate 1).
+- **Line 15** is *why* it can't be fixed (Gate 2 found `.median()`).
 
 Nothing is rewritten, and the exit code is 2 (check with `echo $?`).
 
@@ -984,7 +1057,9 @@ Nothing is rewritten, and the exit code is 2 (check with `echo $?`).
 
 `demo/make_data.py` writes random rows (`chrom, pos, ref, alt, qual, depth`, about
 1% missing depth) in batches of 500,000, so the generator itself never needs much
-memory. It exists so the tests and the demo work with **no download**.
+memory. It exists so the tests and the demo work with **no download**. These two
+scripts take the data file as an argument (`sys.argv[1]`), so they need `--data`;
+this is the other style TracePatch supports.
 
 ```bash
 python3 demo/make_data.py
@@ -1018,7 +1093,7 @@ Neither adds logic. **The project is the CLI.**
 
 ## 13. The tests
 
-Run all of them with `python3 -m pytest` (54 tests, about 16 s). Add `-v` to see each name.
+Run all of them with `python3 -m pytest` (63 tests, about 20 s). Add `-v` to see each name.
 
 | File | Count | What it proves |
 |---|---|---|
@@ -1029,6 +1104,7 @@ Run all of them with `python3 -m pytest` (54 tests, about 16 s). Add `-v` to see
 | `test_rewriter.py` | 13 | template output **verified by Gate 3**; repeated expression computed once; **rows matching a condition counted correctly**; filter-then-sum refused; unsupported use refused; no loader; already chunked; LLM with fake client: fences stripped, feedback sent, refusal / CANNOT_CHUNK / bad Python, no key; **Claude only called when the template can't** |
 | `test_orchestrator.py` | 7 | full pipeline verified on 1M rows (output = uncapped pandas); median refused, nothing written; module-level refused; no problem under cap; **retry loop stops at exactly 3**; cap can't be raised; splice helpers |
 | `test_interactive.py` | 2 | dragged-in paths (quoted, escaped spaces) are cleaned; chunk size follows row width |
+| `test_script_only.py` | 9 | the three ways a script can name its data file are recognised; a script with the path inside is **repaired with no `--data`**; **Gate 3 really uses the sample** (a full read would break a 150 MB cap); a patch that reads a different file is rejected; `--apply` keeps a backup and the script then **survives the same limit that killed it** |
 | `test_end_to_end.py` | 2 | the real demo files through the real CLI |
 
 Three kinds of test: **unit** (one function, e.g. the oracle), **integration**
@@ -1083,9 +1159,9 @@ On ClinVar, the rewritten script passed Gate 3 (same answer on the sample), but
 the **full-scale check found it still used more than 600 MB**. ClinVar rows have
 43 text columns, so one 100,000-row chunk was itself huge. TracePatch treated
 that as a new fault, and on the next attempt Gate 2 refused its own patch, so
-**nothing unsafe was accepted**. The fix was to read smaller chunks: a
-`--chunk-rows` option, and in interactive mode a chunk size chosen from the row
-width. With 25,000 rows per chunk: 678 MB → about 180 MB, same answer. This is
+**nothing unsafe was accepted**. The fix was to read smaller chunks: the chunk
+size is now chosen from the row width (and `--chunk-rows` can override it).
+With 25,000 rows per chunk: 678 MB → about 180 MB, same answer. This is
 the best evidence that the full-scale check is needed: the sample test alone
 would have accepted that patch.
 
@@ -1105,12 +1181,13 @@ Say these before the panel finds them:
   a random sample.
 - **The full-scale run proves memory, not correctness** (the original never
   finishes under the cap, so there is no full answer to compare against).
-- **The data path must be an argument.** The script must read the path from
-  `sys.argv[1]` and load the data inside a function that takes the path. Scripts
-  with the path written inside the code are not supported yet.
-- **The chunk size is a setting.** It is chosen from the row width in interactive
-  mode and given by `--chunk-rows` in command mode; it is not tuned automatically
-  from the memory cap.
+- **The loading must be inside a function.** A script that calls `read_csv` at
+  the top level, outside any function, is refused.
+- **The data path must be simple**: written in the `read_csv` call, a constant at
+  the top of the script, or the function's argument. A path built at run time
+  (for example joined from several parts) is not recognised.
+- **The chunk size is estimated from the row width**, not tuned from the memory
+  cap. If the estimate is too large, the full-scale check rejects the patch.
 - **The sandbox isolates processes; it is not a security boundary.**
 - **Memory sampling can miss very fast spikes.** The tool then reports "unknown
   line" and never guesses.
@@ -1157,6 +1234,7 @@ Each phase got its own branch and pull request (PR), and was merged into `main`:
 | #6 | `feature/demo-readme` | Phase 5: demo data and pipelines, end-to-end tests, README; contract marked agreed |
 | #7 | `docs/learning-guide` | this guide |
 | #8 | `feature/demo-ui` | interactive mode, real ClinVar scripts, `--chunk-rows`, template-then-Claude, condition counting, clearer errors, optional walkthrough and web page, final docs |
+| #9 | `feature/script-only-flow` | data file read from the script itself, automatic chunk size, `limit`, `--apply` and `restore` |
 
 **CONTRACT.md:** the July version split the work (A: Gates 1 and 2; B: Gate 3 and the LLM).
 On Oct 8 both authors agreed to these changes:
@@ -1337,15 +1415,25 @@ other genomics files are far larger.
 The whole file is 455 MB compressed and takes a long time to download and run
 in a live demo. The method does not depend on the size.
 
-**Q: Why is "uploading" a file path?**
-It is a command-line tool. Giving the path is how you hand a file to a CLI;
-dragging a file into the terminal pastes its path. TracePatch does not load the
-data itself; the script does.
+**Q: How does TracePatch know which data file the script uses?**
+It reads the script's code. The path can be written in the `read_csv` call, be a
+constant at the top of the script, or be passed as an argument; `dataref.py`
+recognises all three. TracePatch never loads the data itself; it only takes a
+5,000-row sample from that file for Gate 3.
 
-**Q: Why does the data path have to be an argument?**
-Because pipelines run the same script on many files, so the path is passed in.
-It also lets Gate 3 run the same function on a small sample. Scripts with the
-path written inside are a known limitation.
+**Q: If the path is inside the script, how does Gate 3 test on a sample?**
+In the sandbox it points the function at the sample: it overrides the constant,
+or swaps the written path for a variable, or passes the sample as the argument.
+A test proves this: with a 150 MB sandbox cap, a full read would be killed.
+
+**Q: What does `limit` do, and is the crash real?**
+It runs the script through our watchdog, which kills it above the limit, exactly
+as a cluster's memory limit would. On this laptop the kill is simulated by the
+watchdog; on a cluster the scheduler does it.
+
+**Q: What does `--apply` do? Is it safe?**
+It replaces the script with the patch only after every check has passed, and
+keeps the original as `SCRIPT.orig`. `restore` puts it back.
 
 #### About the design choices
 
@@ -1364,8 +1452,9 @@ Sampling the line costs a little, so 50 ms keeps the overhead low. The cap check
 is cheap, so it runs more often to limit how far the script overshoots.
 
 **Q: How was the chunk size chosen?**
-Interactive mode aims for about 16 MB of file per chunk, so wide tables get
-fewer rows per chunk (25,000 for ClinVar, 100,000 for the narrow synthetic file).
+TracePatch aims for about 16 MB of file per chunk, measured on the sample, so
+wide tables get fewer rows per chunk (25,000 for ClinVar, 100,000 for the narrow
+synthetic file). `--chunk-rows` overrides it.
 
 **Q: What happens if the chunk size is too big?**
 The full-scale check catches it: memory still goes over the cap, and the patch
@@ -1417,7 +1506,7 @@ security sandbox; we state that as a limit.
 #### About testing and your work
 
 **Q: How did you test it?**
-54 automated tests: unit tests for each gate, integration tests that pass a
+63 automated tests: unit tests for each gate, integration tests that pass a
 rewrite through Gate 3, and end-to-end tests of the CLI. Plus manual runs on the
 real ClinVar file, checked against plain pandas.
 
@@ -1426,9 +1515,39 @@ Pick one from section 14: the test script that used 300 MB in 10 ms, the sample
 that fitted in one chunk, or the ClinVar chunks that were too big.
 
 **Q: What would you do next?**
-Median and other operations with special merges; scripts with a hard-coded
-path; random sampling for Gate 3; choosing the chunk size from the memory cap; a
-live evaluation of the LLM rewriter; formats such as VCF.
+Median and other operations with special merges; group-by and filter patterns;
+code outside functions; random sampling for Gate 3; choosing the chunk size from
+the memory cap; a live evaluation of the LLM rewriter; running automatically
+when a cluster job is killed.
+
+#### About real-world use
+
+**Q: Is this a real problem, or one you made up?**
+It is real and common. Clusters kill jobs that exceed their memory request
+(Slurm reports an "oom-kill event"), and workflow tools such as Nextflow have a
+standard recipe for it: retry the task with more memory when the exit status is
+137. See section 21 for the sources.
+
+**Q: How do people handle it today?**
+Mostly by asking for more memory and re-running. Otherwise they rewrite the
+script by hand (chunks, fewer columns, smaller types), or move to another engine
+such as Dask, Polars or DuckDB. The pandas documentation itself recommends these.
+
+**Q: Would a scientist use TracePatch as it is?**
+Not as it is. It is a prototype: it repairs a small set of patterns. What it
+demonstrates is the method, that an automatic repair can be checked for the same
+answer and for real memory use before anyone trusts it.
+
+**Q: Then what is it good for?**
+Two things carry over directly: finding the line that blew up when the system
+gives no traceback, and verifying a rewrite, including one written by an LLM,
+which people now ask chatbots for and paste in without checking.
+
+**Q: Could it become a product?**
+With more work: more patterns (group-by, filters, joins against small tables),
+reading the real limit from the cluster instead of simulating it, random
+sampling, and integration with workflow tools so it runs when a job is killed.
+The verification idea is the part worth keeping.
 
 ---
 
@@ -1461,29 +1580,101 @@ live evaluation of the LLM rewriter; formats such as VCF.
 
 ```bash
 pip install -r requirements.txt          # install libraries
-python3 -m pytest                        # all 54 tests
+python3 -m pytest                        # all 63 tests
 
-# The demo (interactive: it asks for the dataset and the script)
-python3 -m tracepatch
+# The full story on real data
+python3 demo/clinvar_summary.py                          # the script, run normally
+python3 -m tracepatch limit demo/clinvar_summary.py      # under a 500 MB limit: killed
+python3 -m tracepatch                                    # interactive: give it the script
+python3 -m tracepatch limit demo/clinvar_summary.py      # after applying: finishes
+python3 -m tracepatch restore demo/clinvar_summary.py    # put the original back
 
-# The same runs as single commands
-python3 -m tracepatch run demo/clinvar_summary.py    --data demo/data/clinvar.tsv --mem-limit-mb 500 --chunk-rows 25000
-python3 -m tracepatch run demo/clinvar_pathogenic.py --data demo/data/clinvar.tsv --mem-limit-mb 500 --chunk-rows 25000
-python3 -m tracepatch run demo/clinvar_median.py     --data demo/data/clinvar.tsv --mem-limit-mb 500
-python3 -m tracepatch run demo/clinvar_needs_llm.py  --data demo/data/clinvar.tsv --mem-limit-mb 500 --chunk-rows 25000
+# The same as single commands
+python3 -m tracepatch run demo/clinvar_summary.py
+python3 -m tracepatch run demo/clinvar_summary.py --apply
+python3 -m tracepatch run demo/clinvar_pathogenic.py
+python3 -m tracepatch run demo/clinvar_median.py         # refused
+python3 -m tracepatch run demo/clinvar_needs_llm.py      # template can't; needs the LLM
 
 echo $?                                  # exit code of the last command (0 / 1 / 2)
 cat tracepatch_out/clinvar_summary.diff  # see what was changed
 
-# Synthetic data (no download needed)
-python3 demo/make_data.py
-python3 -m tracepatch run demo/safe_pipeline.py   --data demo/big.csv --mem-limit-mb 300
-python3 -m tracepatch run demo/unsafe_pipeline.py --data demo/big.csv --mem-limit-mb 300
+# With the LLM (needs a key; see the runbook)
+export ANTHROPIC_API_KEY=...             # in your own terminal only
+python3 -m tracepatch run demo/clinvar_needs_llm.py --rewriter auto
 
-# One stage on its own
-python3 -m tracepatch.gate1_tracer demo/clinvar_summary.py demo/data/clinvar.tsv --mem-limit-mb 500
+# Synthetic data (no download; these scripts take the file as an argument)
+python3 demo/make_data.py
+python3 -m tracepatch run demo/safe_pipeline.py   --data demo/big.csv
+python3 -m tracepatch run demo/unsafe_pipeline.py --data demo/big.csv
 
 # Optional extras
 bash demo/terminal_demo.sh               # narrated walkthrough
 python3 demo/app.py                      # web page at http://127.0.0.1:8050
 ```
+
+---
+
+## 21. Real-world context: who has this problem?
+
+**Be accurate about this in the review.** We did not survey scientists. What
+follows is what public documentation shows.
+
+### Where the problem really occurs
+
+- **Analyses run on shared clusters with a memory limit per job.** When a job
+  uses more than it asked for, the scheduler kills it. Slurm, the most common
+  scheduler, reports this as an "oom-kill event". The fix that university help
+  pages give is to look at how much memory the job used and ask for more.
+- **Workflow tools treat it as routine.** Nextflow's documented pattern is to
+  retry a task with more memory when its exit status is 137–140:
+  `errorStrategy { task.exitStatus in 137..140 ? 'retry' : 'terminate' }` with
+  `memory { 2.GB * task.attempt }`. nf-core's troubleshooting guide notes that
+  data can be large enough to fail even after the default three retries.
+- **pandas loads everything into memory.** The pandas user guide has a whole
+  page, "Scaling to large datasets", recommending `usecols`, smaller data types,
+  chunking, or another library such as Dask.
+- **Genomics tools for tables have low-memory modes.** For example the
+  `pysumstats` library for GWAS summary statistics has a `low_ram` option meant
+  for when you hit memory errors.
+
+### What people do about it today
+
+| Approach | Good | Weak |
+|---|---|---|
+| Ask for more memory and re-run | no code change | wastes cluster time; has a ceiling; the cause is never found |
+| Rewrite by hand (chunks, `usecols`, dtypes) | full control | slow, and easy to get silently wrong (median, duplicates) |
+| Switch engine (Dask, Polars, DuckDB) | scales well | a rewrite in a new library; nothing checks the answer is unchanged |
+| Ask an LLM to "make it memory efficient" | fast | no guarantee the result is correct or actually fits |
+
+### Where TracePatch fits, honestly
+
+- **It is a prototype of a method, not a tool scientists use today.** It repairs
+  a small set of aggregation patterns in pandas scripts.
+- **What is transferable:** (1) finding the line that was running when a job was
+  killed with no traceback; (2) **verifying an automatic rewrite** before
+  trusting it: same answer on a sample, and memory really under the limit on the
+  full file. The second matters more now that people paste LLM rewrites into
+  pipelines unchecked.
+- **Raw sequencing formats (FASTQ, BAM, VCF) are not its target.** Those are
+  processed by streaming tools such as samtools and bcftools. TracePatch is about
+  the table-analysis step that comes afterwards: annotation tables like ClinVar,
+  variant tables, summary statistics.
+
+### What a real product would need
+
+More repair patterns (group-by with decomposable aggregates, filters, joins
+against small tables); reading the job's real memory limit from the cluster
+instead of simulating one; random sampling in Gate 3; running automatically when
+a workflow task is killed; and an evaluation on real pipelines.
+
+### Sources
+
+- Slurm out-of-memory kills, and the advice to request more memory: MSU ICER,
+  "SLURM Job Failure Due to the oom Error", https://icer.msu.edu/for-hpcc-users/topic-of-the-month/slurm-job-failure-due-to-the-oom-error
+- Nextflow retry-with-more-memory on exit status 137–140: Seqera, "Error recovery
+  and automatic resources management", https://seqera.io/blog/error-recovery-and-automatic-resources-management/
+- nf-core troubleshooting, tasks that run out of memory even after retries:
+  https://nf-co.re/docs/usage/troubleshooting/crash_halfway
+- pandas user guide, "Scaling to large datasets": https://pandas.pydata.org/docs/user_guide/scale.html
+- `pysumstats` `low_ram` option: https://pysumstats.readthedocs.io/en/latest/package/base/sumstats.html
