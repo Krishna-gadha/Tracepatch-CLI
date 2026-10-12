@@ -151,10 +151,9 @@ def test_gzip_script_is_repaired_end_to_end(big_csv, tmp_path, cap_mb):
 
 # ---- chunks too big for the limit: retry with smaller chunks ----------------
 
-def test_chunk_size_is_halved_when_a_chunk_is_too_big(big_csv, tmp_path, memory_profile):
+def test_chunk_size_is_halved_when_a_chunk_is_too_big(big_csv, tmp_path, cap_mb):
     fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sum_pipeline.py")
-    baseline, eager = memory_profile
-    cap = round(baseline + 0.8 * (eager - baseline))
+    cap = cap_mb
     # Start with the whole file as one "chunk": certain to break the cap.
     r = run(fixture, big_csv, cap, out_dir=str(tmp_path / "out"), echo=quiet, chunk_rows=1_000_000)
     halvings = [line for line in r.log if "trying" in line and "rows at a time" in line]

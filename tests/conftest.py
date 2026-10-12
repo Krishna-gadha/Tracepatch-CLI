@@ -27,7 +27,9 @@ NO_LIMIT_MB = 1_000_000
 
 def measure(script: str, data: str, work_dir: str):
     """(baseline MB, eager MB): the script on a tiny file, and on the real one."""
-    eager = trace(script, [data], mem_limit_mb=NO_LIMIT_MB).peak_mb
+    # Peak memory varies by 10-15% from run to run, so measure twice and keep
+    # the LOWER value: the limit must be below even a "light" run.
+    eager = min(trace(script, [data], mem_limit_mb=NO_LIMIT_MB).peak_mb for _ in range(2))
     tiny = os.path.join(work_dir, "tiny_" + os.path.basename(data))
     with open(data, "rb") as src, open(tiny, "wb") as dst:
         for i, line in enumerate(src):
