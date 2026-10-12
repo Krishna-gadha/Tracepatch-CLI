@@ -114,19 +114,22 @@ class _AggCollector(ast.NodeTransformer):
 
     def __init__(self, df: str):
         self.df = df
-        self.aggs: List[Tuple[str, str]] = []  # (per-chunk expression, combine fn)
+        # (per-chunk expression, combine fn, keep as a plain Python int?)
+        self.aggs: List[Tuple[str, str, bool]] = []
 
     def visit_Call(self, node):
+        as_int = False
         if _is_column_agg(node, self.df):
             combine = COMBINE[node.func.attr]
         elif _is_len(node, self.df):
             combine = "sum"  # rows = sum of rows per chunk
+            as_int = True    # len() gives a plain int; keep it one (pandas would give numpy int64)
         elif _is_condition_count(node, self.df):
             combine = "sum"  # matching rows = sum of matches per chunk
         else:
             return self.generic_visit(node)
         per_chunk = ast.unparse(_Rename(self.df, CHUNK_VAR).visit(copy.deepcopy(node)))
-        key = (per_chunk, combine)
+        key = (per_chunk, combine, as_int)
         if key not in self.aggs:  # same expression twice -> compute once
             self.aggs.append(key)
         return ast.copy_location(ast.Name(f"_tp_agg_{self.aggs.index(key)}", ast.Load()), node)
@@ -196,11 +199,12 @@ class TemplateRewriter(Rewriter):
         for i in range(len(collector.aggs)):
             lines.append(f"    _tp_parts_{i} = []")
         lines.append(f"    for {CHUNK_VAR} in {ast.unparse(loader)}:")
-        for i, (per_chunk, _) in enumerate(collector.aggs):
+        for i, (per_chunk, _, _) in enumerate(collector.aggs):
             lines.append(f"        _tp_parts_{i}.append({per_chunk})")
         lines.append("    # Merge the partial results (pandas skips NaN, like the original).")
-        for i, (_, combine) in enumerate(collector.aggs):
-            lines.append(f"    _tp_agg_{i} = {module}.Series(_tp_parts_{i}).{combine}()")
+        for i, (_, combine, as_int) in enumerate(collector.aggs):
+            merged = f"{module}.Series(_tp_parts_{i}).{combine}()"
+            lines.append(f"    _tp_agg_{i} = {'int(' + merged + ')' if as_int else merged}")
         for stmt in after:
             lines.append(_indent(ast.unparse(stmt), 1))
         code = "\n".join(lines) + "\n"
@@ -365,6 +369,11 @@ class LocalLLMRewriter(Rewriter):
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
                 answer = json.load(response)
+        except urllib.error.HTTPError as e:
+            # Ollama answered, but with an error, e.g. the model is not installed.
+            detail = e.read().decode("utf-8", "replace")[:200]
+            raise RewriteError(f"the local model {self.model!r} could not be used ({detail.strip()}); "
+                               f"install it with: ollama pull {self.model}")
         except (urllib.error.URLError, OSError) as e:
             raise RewriteError(f"could not reach the local model at {self.url} ({e}); "
                                "is Ollama running?")

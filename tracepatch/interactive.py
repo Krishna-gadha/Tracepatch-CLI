@@ -10,6 +10,7 @@ import ast
 import os
 import shlex
 
+from tracepatch.datafile import UnsupportedDataFile, describe
 from tracepatch.dataref import find_data_ref
 from tracepatch.orchestrator import auto_chunk_rows, run  # noqa: F401 (auto_chunk_rows re-exported)
 
@@ -52,14 +53,12 @@ def ask_file(prompt: str, extensions) -> str:
 
 
 def describe_dataset(path: str):
-    """Size, rows and columns, read line by line (never loads the file)."""
-    with open(path, "rb") as f:
-        header = f.readline().decode("utf-8", "replace").rstrip("\r\n")
-        rows = sum(1 for _ in f)
+    """Size, rows and columns, read line by line (never loads the file).
+    Works on compressed and non-UTF-8 files (see datafile.py)."""
+    size, rows, header_bytes = describe(path)
+    header = header_bytes.decode("utf-8", "replace").rstrip("\r\n")
     sep = "\t" if header.count("\t") > header.count(",") else ","
-    columns = header.split(sep)
-    size = os.path.getsize(path)
-    return size, rows, columns
+    return size, rows, header.split(sep)
 
 
 def describe_script(path: str):
@@ -130,7 +129,11 @@ def _main() -> int:
         else:
             print("   The script takes its data file as an argument.")
         data = data_file = ask_file("   Drag the data file here and press Enter: ", (".csv", ".tsv", ".txt"))
-    size, rows, columns = describe_dataset(data_file)
+    try:
+        size, rows, columns = describe_dataset(data_file)
+    except UnsupportedDataFile as e:
+        print(_c("31", f"   ✗ {e}"))
+        return 1
     print(_c("32", f"   ✓ {os.path.basename(data_file)}: {size / 1048576:.0f} MB, {rows:,} rows, "
                    f"{len(columns)} columns\n"))
 

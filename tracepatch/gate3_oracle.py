@@ -143,3 +143,30 @@ def oracle_verdict(expected_norm: Any, actual_norm: Any) -> dict:
     if diff is None:
         return {"verified": True, "reason": "", "diff": None}
     return {"verified": False, "reason": "output mismatch", "diff": diff}
+
+
+def _as_number(token: str) -> Optional[float]:
+    try:
+        return float(token.strip(",;:()[]{}%"))
+    except ValueError:
+        return None
+
+
+def compare_printed(expected: str, actual: str) -> Optional[str]:
+    """Compare what two runs PRINTED. Numbers are compared with the same
+    tolerance as returned values; every other word must match exactly."""
+    e_lines, a_lines = expected.strip().splitlines(), actual.strip().splitlines()
+    if len(e_lines) != len(a_lines):
+        return f"printed {len(a_lines)} lines, expected {len(e_lines)}"
+    for n, (e_line, a_line) in enumerate(zip(e_lines, a_lines), start=1):
+        e_tokens, a_tokens = e_line.split(), a_line.split()
+        if len(e_tokens) != len(a_tokens):
+            return f"printed line {n} differs: expected {e_line!r}, got {a_line!r}"
+        for e, a in zip(e_tokens, a_tokens):
+            e_num, a_num = _as_number(e), _as_number(a)
+            if e_num is not None and a_num is not None:
+                if not np.allclose(e_num, a_num, rtol=RTOL, atol=ATOL, equal_nan=True):
+                    return f"printed line {n} differs: expected {e}, got {a}"
+            elif e != a:
+                return f"printed line {n} differs: expected {e_line!r}, got {a_line!r}"
+    return None

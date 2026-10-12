@@ -6,6 +6,8 @@ Executes one function on the sample data and writes its return value,
 normalised to JSON (never pickle), to the result file named in the job.
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -27,8 +29,12 @@ def main():
         # CHUNKSIZE stays small, and the data-file variable points at the sample.
         namespace["CHUNKSIZE"] = job["chunksize"]
         namespace.update(job["overrides"])
-        result = namespace[job["func_name"]](*job["call_args"])
-        out = {"ok": True, "result": normalize(result)}
+        # Many analysis functions PRINT their result instead of returning it,
+        # so what is printed is captured and compared too.
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            result = namespace[job["func_name"]](*job["call_args"])
+        out = {"ok": True, "result": normalize(result), "printed": printed.getvalue()}
     except Exception:
         out = {"ok": False, "error": traceback.format_exc(limit=5)}
     with open(job["result_path"], "w") as f:

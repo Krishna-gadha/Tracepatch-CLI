@@ -83,3 +83,30 @@ def replace_literal_path(source: str, path: str, variable: str):
     t = _PointLiteralAt(path, variable)
     tree = t.visit(tree)
     return ast.unparse(tree) + "\n", t.count
+
+
+def uncallable_reason(script_source: str, func_name: str, ref: DataRef) -> Optional[str]:
+    """Gate 3 has to call the function by itself on a sample. Return a clear
+    reason if that is impossible, instead of letting it fail with a confusing error."""
+    tree = ast.parse(script_source)
+    for cls in ast.walk(tree):
+        if isinstance(cls, ast.ClassDef):
+            for node in cls.body:
+                if isinstance(node, ast.FunctionDef) and node.name == func_name:
+                    return (f"{func_name}() is a method of the class {cls.name}; TracePatch can only test a "
+                            "plain function. Move the loading and the calculation into a function")
+    func = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
+    if func is None:
+        return f"function {func_name}() not found"
+    args = func.args
+    positional = args.posonlyargs + args.args
+    required = [a.arg for a in positional[:len(positional) - len(args.defaults)]]
+    required += [a.arg for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is None]
+    allowed = [ref.name] if ref.kind == "param" else []
+    extra = [a for a in required if a not in allowed]
+    if extra:
+        return (f"{func_name}() needs other arguments ({', '.join(extra)}) that TracePatch cannot supply "
+                "when it tests the function on a sample. Give them default values, or use a function "
+                "that takes only the data file")
+    return None

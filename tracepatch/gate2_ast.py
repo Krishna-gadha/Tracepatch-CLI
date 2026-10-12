@@ -56,6 +56,37 @@ KNOWN_UNSAFE_METHODS = {
     "sorted",                                # bare builtin: global ordering
 }
 
+# Extra calls that REWRITTEN code may use to collect and merge per-chunk
+# results. This list is only for checking a patch before it is run (Gate 3);
+# it does NOT make Gate 2 accept more original code. Anything not listed here
+# or above (open, eval, exec, os.system, to_csv, ...) is rejected unrun.
+PATCH_HELPER_CALLS = {
+    "append", "extend",        # collect one partial result per chunk in a list
+    "Series", "DataFrame",     # wrap the partial results to merge them
+    "concat",                  # join partial results (memory is checked at full scale)
+    "min", "max", "sum",       # builtins used to merge: max(running, chunk_max)
+    "round", "bool", "list", "tuple", "dict", "set",  # plain value conversions
+    "isinstance", "enumerate", "zip",                 # plain loop helpers
+    "items", "keys", "values", "get", "update", "add",  # dict / set bookkeeping
+    "isnull", "notnull", "fillna",                    # row-wise missing-value handling
+}
+
+
+def disallowed_in_patch(tree) -> List[str]:
+    """Things in rewritten code that are outside the allowed vocabulary."""
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            problems.append(f"access to {node.attr}")
+        if not isinstance(node, ast.Call):
+            continue
+        kind, name = _call_name(node)
+        allowed = CHUNK_SAFE_METHODS | LOADER_METHODS | SAFE_BUILTINS | PATCH_HELPER_CALLS
+        if kind == "other" or name not in allowed:
+            problems.append(f"{name}()")
+    return sorted(set(problems))
+
+
 # Loaders are the thing we rewrite (to add chunksize=), so they are skipped,
 # not judged. Only loaders that support chunksize= belong here.
 LOADER_METHODS = {
