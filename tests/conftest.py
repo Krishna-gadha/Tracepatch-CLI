@@ -1,0 +1,79 @@
+"""Shared test data, and a memory limit MEASURED on the machine running the tests.
+
+How much memory pandas needs to load a file depends on the operating system,
+the Python version and the pandas version (newer pandas stores text far more
+compactly). A fixed limit such as "200 MB" is therefore right on one machine
+and wrong on another. So the tests measure it:
+
+    eager    = peak memory when the test file is loaded all at once
+    baseline = peak memory of the same script on a tiny file (Python + pandas)
+    limit    = baseline + 55% of the difference
+
+Loading everything is then always over the limit, and a chunked version is
+always comfortably under it.
+"""
+
+import os
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from tracepatch.gate1_tracer import trace
+
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
+NO_LIMIT_MB = 1_000_000
+
+
+def measure(script: str, data: str, work_dir: str):
+    """(baseline MB, eager MB): the script on a tiny file, and on the real one."""
+    # Peak memory varies by 10-15% from run to run, so measure twice and keep
+    # the LOWER value: the limit must be below even a "light" run.
+    eager = min(trace(script, [data], mem_limit_mb=NO_LIMIT_MB).peak_mb for _ in range(2))
+    tiny = os.path.join(work_dir, "tiny_" + os.path.basename(data))
+    with open(data, "rb") as src, open(tiny, "wb") as dst:
+        for i, line in enumerate(src):
+            if i > 1000:
+                break
+            dst.write(line)
+    baseline = trace(script, [tiny], mem_limit_mb=NO_LIMIT_MB).peak_mb
+    if eager - baseline < 40:
+        pytest.skip(f"loading the test data costs only {eager - baseline:.0f} MB here: "
+                    "too little to simulate an out-of-memory kill")
+    return baseline, eager
+
+
+def measure_cap(script: str, data: str, work_dir: str, fraction: float = 0.55) -> int:
+    baseline, eager = measure(script, data, work_dir)
+    return round(baseline + fraction * (eager - baseline))
+
+
+@pytest.fixture(scope="session")
+def big_csv(tmp_path_factory):
+    """1,000,000 rows. Mostly numbers, whose memory use is the same on every
+    pandas version (8 bytes per value), so the measurement is stable."""
+    n = 1_000_000
+    rng = np.random.default_rng(0)
+    table = {"chrom": rng.choice(["chr1", "chr2", "chrX"], n),
+             "pos": rng.integers(1, 2_000_000, n),
+             "ref": rng.choice(list("ACGT"), n), "alt": rng.choice(list("ACGT"), n),
+             "depth": rng.integers(1, 100, n)}
+    for i in range(6):
+        table[f"score{i}"] = np.round(rng.random(n) * 100, 2)
+    path = tmp_path_factory.mktemp("data") / "variants.csv"
+    pd.DataFrame(table).to_csv(path, index=False)
+    return str(path)
+
+
+@pytest.fixture(scope="session")
+def memory_profile(big_csv, tmp_path_factory):
+    """(baseline MB, eager MB) for loading big_csv on this machine."""
+    return measure(os.path.join(FIXTURES, "sum_pipeline.py"), big_csv,
+                   str(tmp_path_factory.mktemp("calibrate")))
+
+
+@pytest.fixture(scope="session")
+def cap_mb(memory_profile):
+    """A memory limit that loading big_csv all at once is certain to exceed."""
+    baseline, eager = memory_profile
+    return round(baseline + 0.55 * (eager - baseline))

@@ -25,7 +25,7 @@ applied the repair; undo it with `python3 -m tracepatch restore demo/clinvar_sum
 ```bash
 python3 -m pytest
 ```
-Must end with `66 passed`.
+Must end with `90 passed`.
 
 ```bash
 ollama list
@@ -37,13 +37,27 @@ Then do **one full practice run** of the demo below, and `restore` afterwards. A
 - close heavy apps, so memory readings are steady;
 - keep this file open on the side.
 
-## The demo (about 9 minutes with the LLM steps)
+## The demo (about 10 minutes with the LLM steps)
 
-### 1. Say what it is (20 seconds)
+### 1. Set the scene (1 minute)
 
-> "Data scripts that load a huge file at once get killed by the system, with no
-> error message and no line number. TracePatch finds the line, repairs the script to
-> read the file in pieces, and accepts the repair only after verifying it."
+> "A genetics lab looks up each patient's DNA variants in ClinVar, the public
+> database of what other labs found. The lab keeps a local copy of that table,
+> and a bioinformatician has a small Python script that checks and summarises
+> each new copy.
+>
+> The script does not run on a laptop. It is submitted as a job to a shared
+> computing cluster, with a fixed memory limit. The table keeps growing. One day
+> the script needs more memory than the job was given, and the cluster kills it.
+> The log says only 'killed': no error, no line number.
+>
+> Today, people ask for more memory and submit again, or rewrite the script by
+> hand and hope the answer is still right. TracePatch finds the line, repairs the
+> script to read the table in pieces, and accepts the repair only after proving
+> the answer is unchanged and the memory fits."
+
+Say plainly that this is a typical scenario from how such clusters and tools are
+documented to work, not a study of a particular lab.
 
 ### 2. The script and its data
 
@@ -69,9 +83,9 @@ python3 demo/clinvar_summary.py
 python3 -m tracepatch limit demo/clinvar_summary.py
 ```
 
-> "Real analyses run on a shared cluster where every job has a memory limit. With
-> a 500 MB limit the system kills the script. This is everything it reports: no
-> Python error, no line number. The person only knows it died."
+> "On the cluster this would be `sbatch --mem=500M`. Our `limit` command plays the
+> scheduler: with a 500 MB limit the script is killed. This is everything the
+> person sees: no Python error, no line number. They only know it died."
 
 ### 4. TracePatch
 
@@ -92,7 +106,7 @@ As the lines appear:
 | `[Gate 1] KILLED ... fault at line 15` | "It ran the script and was killed again, but this time we recorded the line every 50 milliseconds, so we know it was line 15." |
 | `[Gate 2] ... -> OK` | "We read the code and check every operation. `len`, `sum` and `max` can be computed piece by piece, so it is safe." |
 | `[Rewrite] ... (25,000 rows at a time)` | "It rewrites the load to read 25,000 rows at a time. The chunk size is chosen from how wide the rows are." |
-| `[Gate 3] ... outputs match -> OK` | "The old and new code both run on a 5,000-row sample in an isolated process. Same answer." |
+| `[Gate 3] ... taken from across the file: outputs match -> OK` | "The old and new code both run on 5,000 rows taken from across the file, in an isolated process. Same answer: both what they return and what they print." |
 | `[Verify] peak ... MB -> OK` | "The repaired script runs on the whole file with the memory tracer attached. It stays far under the limit." |
 | `VERIFIED PATCH` and the output | "Only now is the repair accepted. This is the real result: 300,000 records, 1.5 million lab submissions." |
 
@@ -133,8 +147,10 @@ python3 -m tracepatch run demo/clinvar_median.py
 python3 -m pytest
 ```
 
-> "66 automated tests cover every gate, including a patch with a deliberate bug that
-> Gate 3 must catch, and a check that the retry loop stops after three attempts."
+> "90 automated tests. They cover every gate, a patch with a deliberate bug that
+> Gate 3 must catch, the retry loop stopping after three attempts, and every
+> problem we found when we attacked our own tool. They also run automatically on
+> Linux for every change."
 
 ### 8. Optional: a more meaningful question
 
@@ -179,7 +195,7 @@ To show the code the model wrote: `cat tracepatch_out/clinvar_needs_llm.diff`
 python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 ```
 
-> "Here the model's rewrite is wrong: on the sample the original says 34 and the
+> "Here the model's rewrite is wrong: on the sample the original says 27 and the
 > model's code says 5000. Gate 3 rejects it, the reason is sent back to the model,
 > and it is asked again, three times at most. It never gets it right, so TracePatch
 > fails loudly and changes nothing. This is the point of the project: the model can
@@ -200,12 +216,13 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 | Memory after the repair | about 180 MB |
 | Memory limit in the demo | 500 MB |
 | Rows per chunk (ClinVar) | 25,000 (about 16 MB of file per chunk) |
-| Sample for Gate 3 | first 5,000 rows, split into 5 chunks |
+| Sample for Gate 3 | 5,000 rows from 5 places across the file, in 6 uneven chunks (997 rows) |
 | Line sampling / cap check | every 50 ms / every 10 ms |
 | Number tolerance | relative 1e-5, absolute 1e-8 |
 | Retry cap | 3 attempts |
 | Allowlist | 8 methods + 6 builtins |
-| Tests | 66 |
+| Tests | 90 |
+| Awkward cases tried in the risk review | 25, none crashes |
 | LLM | `llama3.2` (3 billion parameters, 2 GB), local through Ollama |
 | Exit codes | 0 verified, 2 refused, 1 failed, 137 killed by `limit` |
 
@@ -222,7 +239,7 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 | `clinvar.tsv` is missing or broken | Use the synthetic data: `python3 demo/make_data.py`, then `python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv` and the same with `demo/unsafe_pipeline.py` |
 | A run fails unexpectedly | Run it once more (memory readings vary a little), then use the synthetic data |
 
-## The twelve most likely questions
+## The most likely questions
 
 1. **What is new here?** Not chunking, but the checks around it: a rewrite is accepted only after the safety check, the sample comparison and the full-scale memory check all pass.
 2. **Is this a real problem?** Yes. Clusters kill jobs that exceed their memory limit (Slurm calls it an "oom-kill event"), and Nextflow's documented recipe is to retry with more memory on exit status 137.
@@ -232,16 +249,18 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 6. **Why refuse the median?** The median of chunk medians is not the median: `[1,2,3]` and `[4,100]` give 27 instead of 3.
 7. **Why an allowlist?** A blocklist allows anything it forgot; an allowlist refuses anything it doesn't know. Wrong "safe" answers are silent, so we fail safe.
 8. **Why a tolerance for numbers?** Chunking changes the order of additions, and `(0.1+0.2)+0.3` is not exactly `0.1+(0.2+0.3)`.
-9. **Does passing the sample prove it works on the full file?** No. That is why the full-scale check exists. On our first ClinVar run it caught a patch that still used over 600 MB.
+9. **Does passing the sample prove it works on the full file?** No. That is why the full-scale check exists. On our first ClinVar run it caught a patch that still used over 600 MB. Now, when a chunk is too big, it halves the chunk size and checks again.
 10. **Your laptop has 24 GB. Is the crash real?** The limit is simulated by our watchdog, the way a cluster scheduler enforces a job's limit. Without it this script needs 678 MB; bigger files need far more.
 11. **Where is the AI?** A language model writes the repairs the template can't (we run `llama3.2` locally), and the project's point is making LLM-written code trustworthy by verifying it. The gates themselves are program analysis and testing.
-12. **What are the limits?** Small allowlist, simple template patterns, sample-based checking, loading must be inside a function, CSV/TSV only, macOS only, process-level sandbox.
+12. **What are the limits?** The LLM is a small local model; checking on a sample is not a proof; only operations known to be chunk-safe are repaired; the loading must be inside a function; CSV/TSV with pandas only. Each one ends in a clear message, never a wrong answer.
+13. **What could go wrong, and did you test that?** Yes. We attacked our own tool with 25 awkward scripts and data files. It found two crashes and one false "verified", which we fixed. All 25 now end cleanly. The list is in `docs/RISK_REVIEW.md`.
 
 More questions with answers: LEARNING_GUIDE.md, section 18. Real-world context
-and sources: section 21.
+and sources: section 21. Everything that could go wrong: RISK_REVIEW.md.
 
 ## Say these plainly if asked
 
+- It has limits, and we list them. What we claim is that it never accepts a repair it could not verify, and never fails silently.
 - We did not survey scientists. What we know about real use comes from public documentation (Slurm, Nextflow, pandas), listed in section 21 of the guide.
 - The demo scripts are simple on purpose. The project is the repair and its verification, not the analysis.
 - It makes no biological claims. ClinVar is used as a real, large table.

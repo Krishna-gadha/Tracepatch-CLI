@@ -11,17 +11,24 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "demo"))
 from make_data import make  # noqa: E402
 
-CAP = "200"  # 1M rows: eager read ~270 MB, chunked ~110 MB (measured)
 
 
 @pytest.fixture(scope="module")
 def data(tmp_path_factory):
-    return make(1_000_000, str(tmp_path_factory.mktemp("demo") / "variants.csv"))
+    return make(2_000_000, str(tmp_path_factory.mktemp("demo") / "variants.csv"))
 
 
-def test_safe_demo_produces_verified_patch(data, tmp_path, capsys):
+@pytest.fixture(scope="module")
+def cap(data, tmp_path_factory):
+    """Memory limit measured on this machine (see conftest.py)."""
+    from conftest import measure_cap
+    return str(measure_cap(os.path.join(ROOT, "demo", "safe_pipeline.py"), data,
+                           str(tmp_path_factory.mktemp("calibrate"))))
+
+
+def test_safe_demo_produces_verified_patch(data, cap, tmp_path, capsys):
     code = main(["run", os.path.join(ROOT, "demo", "safe_pipeline.py"), "--data", data,
-                 "--mem-limit-mb", CAP, "--out-dir", str(tmp_path)])
+                 "--mem-limit-mb", cap, "--out-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert code == 0, out
     assert "[Gate 1] KILLED" in out and "df = pd.read_csv(path)" in out
@@ -32,10 +39,10 @@ def test_safe_demo_produces_verified_patch(data, tmp_path, capsys):
     assert os.path.exists(tmp_path / "safe_pipeline.diff")
 
 
-def test_unsafe_demo_is_refused(data, tmp_path, capsys):
+def test_unsafe_demo_is_refused(data, cap, tmp_path, capsys):
     out_dir = tmp_path / "out"
     code = main(["run", os.path.join(ROOT, "demo", "unsafe_pipeline.py"), "--data", data,
-                 "--mem-limit-mb", CAP, "--out-dir", str(out_dir)])
+                 "--mem-limit-mb", cap, "--out-dir", str(out_dir)])
     out = capsys.readouterr().out
     assert code == 2
     assert "REFUSED: non-decomposable op: median()" in out

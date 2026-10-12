@@ -15,8 +15,8 @@ the subprocess can still read files or use the network. Docker/seccomp
 would be needed for that and is out of scope.
 
 CHUNKSIZE contract: patched code must call read_csv(..., chunksize=CHUNKSIZE).
-The sandbox sets CHUNKSIZE small, so even a small sample is split into
-several chunks and the chunk-merging logic is really exercised.
+The sandbox sets CHUNKSIZE small (and uneven), so even a small sample is split
+into several chunks of different sizes and the merging logic is really exercised.
 """
 
 import ast
@@ -30,11 +30,18 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from tracepatch.dataref import DataRef, replace_literal_path
-from tracepatch.gate3_oracle import oracle_verdict
+from tracepatch.datafile import make_sample  # noqa: F401 (re-exported for callers and tests)
+from tracepatch.gate2_ast import disallowed_in_patch
+from tracepatch.gate3_oracle import compare_printed, oracle_verdict
 from tracepatch.watchdog import run_watched
 
 CHILD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_sandbox_child.py")
-SANDBOX_CHUNKSIZE = 1000
+# Deliberately NOT a divisor of the 5,000-row sample: 997 gives five full chunks
+# and one small one. Some wrong rewrites (for example averaging the chunk
+# averages) give the right answer when every chunk has the same size, and only
+# go wrong when the last chunk is smaller, as it is on a real file.
+SANDBOX_CHUNKSIZE = 997
+ORIGINAL_FAILED = "original code failed on the sample"
 SAFE_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT")
 PLACEHOLDER = re.compile(r"\bTODO\b|\bFIXME\b|NotImplementedError|^\s*\.\.\.\s*$", re.MULTILINE)
 
@@ -43,26 +50,22 @@ PLACEHOLDER = re.compile(r"\bTODO\b|\bFIXME\b|NotImplementedError|^\s*\.\.\.\s*$
 class SandboxRun:
     ok: bool
     result: Any = None  # normalised return value
+    printed: str = ""   # what the function printed
     error: str = ""
     timed_out: bool = False
     killed_by_cap: bool = False
     peak_mb: float = 0.0
 
 
-def make_sample(data_path: str, out_path: str, n_rows: int = 5000) -> str:
-    """Copy the header + first n_rows lines. Plain file reading, so it never
-    loads the big file. Limit: the head of a file is not a random sample."""
-    with open(data_path) as src, open(out_path, "w") as dst:
-        for i, line in enumerate(src):
-            if i > n_rows:
-                break
-            dst.write(line)
-    return out_path
-
-
 def _is_constant_assignment(node) -> bool:
-    return (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-            and all(isinstance(t, ast.Name) for t in node.targets))
+    """NAME = a literal value: text, a number, or a list/tuple/dict/set of those."""
+    if not (isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets)):
+        return False
+    try:
+        ast.literal_eval(node.value)  # succeeds only for plain literal values
+        return True
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
 
 
 def extract_imports(script_source: str) -> str:
@@ -125,7 +128,7 @@ def run_in_sandbox(source: str, func_name: str, sample_path: str,
             out = json.load(f)
         if not out["ok"]:
             return SandboxRun(False, error=out["error"], peak_mb=peak)
-        return SandboxRun(True, result=out["result"], peak_mb=peak)
+        return SandboxRun(True, result=out["result"], printed=out.get("printed", ""), peak_mb=peak)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -141,6 +144,20 @@ def _static_checks(patched_src: str, func_name: str) -> Optional[str]:
     names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     if func_name not in names:
         return f"patched code does not define {func_name}()"
+    # A patch is one function and nothing else: no extra statements that would
+    # run when the code is loaded, and no imports beyond the data libraries.
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            modules = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            if all(m.split(".")[0] in ("pandas", "numpy") for m in modules):
+                continue
+            return f"patched code imports {', '.join(modules)}; only the function itself is allowed"
+        return "patched code contains statements outside the function"
+    bad = disallowed_in_patch(tree)
+    if bad:
+        return ("patched code uses operations outside the allowed vocabulary: " + ", ".join(bad[:6]))
     used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     if "CHUNKSIZE" not in used:
         return "patched code does not use chunksize=CHUNKSIZE, so the oracle cannot test chunk merging"
@@ -162,8 +179,13 @@ def verify_patch(original_src: str, patched_src: str, func_name: str, sample_pat
     original = run_in_sandbox(preamble + original_src, func_name, sample_path,
                               timeout_s=timeout_s, mem_limit_mb=mem_limit_mb, data_ref=data_ref)
     if not original.ok:
-        return {"verified": False, "reason": "original code failed on the sample",
-                "diff": original.error}
+        return {"verified": False, "reason": ORIGINAL_FAILED, "diff": original.error}
+    # If the function neither returns nor prints anything, there is nothing to
+    # compare: saying "outputs match" would be an empty promise.
+    if original.result == {"kind": "exact", "value": None} and not original.printed.strip():
+        return {"verified": False, "reason": "nothing to verify",
+                "diff": f"{func_name}() returns nothing and prints nothing, so its result cannot be "
+                        "checked. Make it return (or print) what it computes"}
 
     patched = run_in_sandbox(preamble + patched_src, func_name, sample_path,
                              timeout_s=timeout_s, mem_limit_mb=mem_limit_mb, data_ref=data_ref)
@@ -174,4 +196,9 @@ def verify_patch(original_src: str, patched_src: str, func_name: str, sample_pat
     if not patched.ok:
         return {"verified": False, "reason": "patched code raised an exception", "diff": patched.error}
 
-    return oracle_verdict(original.result, patched.result)
+    verdict = oracle_verdict(original.result, patched.result)
+    if verdict["verified"]:
+        printed_diff = compare_printed(original.printed, patched.printed)
+        if printed_diff:
+            return {"verified": False, "reason": "printed output mismatch", "diff": printed_diff}
+    return verdict

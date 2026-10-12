@@ -163,11 +163,12 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - [x] Data file read from the script itself (path in the call, a top-level constant, or an argument)
 - [x] Demo on real ClinVar data: two scripts verified, median refused
 - [x] Demo on synthetic data: `safe_pipeline.py` verified, `unsafe_pipeline.py` refused
-- [x] Test suite (`python3 -m pytest`): 66 tests passing
+- [x] Test suite (`python3 -m pytest`): 90 tests passing, run automatically on Linux and macOS
+- [x] Risk review: 25 awkward scripts and data files, none crashes (`docs/RISK_REVIEW.md`)
 - [x] LLM rewriting, run live with a local model (`llama3.2` through Ollama): one script repaired and verified, one wrong repair rejected by Gate 3
 - [ ] `LLMRewriter` (Claude) against the real API: implemented, but only tested with a fake client. **No live Claude call has been made** (needs a paid key).
-- [ ] Code outside a function (top-level `read_csv`): refused, not repaired
-- [ ] Tested on Linux / Windows: only run on macOS so far (the code avoids Unix-only modules)
+- [ ] Code outside a function (top-level `read_csv`): refused with advice, not repaired
+- [ ] Windows: untested (the code avoids Unix-only modules; macOS and Linux are tested)
 - [ ] Real genomics formats (VCF/BAM): not supported; CSV/TSV only
 
 ## Known limits
@@ -181,18 +182,19 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - **The template rewriter only handles simple aggregations**: `df[col].sum()`,
   `.count()`, `.min()`, `.max()`, `len(df)` and `(df[col] == value).sum()`. It
   refuses everything else, such as filtering rows and then aggregating.
-- **Sample-based verification is not a proof.** Gate 3 compares outputs on the
-  first N rows (not a random sample). The full-scale run proves the patch fits in
-  memory, but its output cannot be compared with the original, because the original
-  never finishes.
+- **Sample-based verification is not a proof.** Gate 3 compares what the function
+  returns and prints on 5,000 rows taken from across the file. The full-scale run
+  proves the patch fits in memory, but its output cannot be compared with the
+  original, because the original never finishes.
 - **The chunk size is estimated from the row width** (about 16 MB of file per
-  chunk), not tuned from the memory cap. If it is too large, the full-scale check
-  rejects the patch (this happened on ClinVar's 43-column rows with 100,000-row chunks).
+  chunk). If a chunk is still too big, the full-scale check catches it and the
+  chunk size is halved, within the three attempts.
 - **This is a prototype of a method, not a tool in use.** We did not survey
   users. `docs/LEARNING_GUIDE.md` section 21 describes, with sources, how the
   problem is handled in practice today.
-- **The sandbox isolates processes; it is not a security boundary.** Code in it can
-  still read files and use the network.
+- **The sandbox isolates processes; it is not a security boundary.** Rewritten
+  code is checked against a fixed vocabulary before it runs (no `open`, `eval`,
+  imports, ...), but real isolation needs containers.
 - **Memory sampling:** the watchdog polls every 10 ms and the line sampler every
   50 ms. A very fast allocator can overshoot the cap, or hit it before any line
   is recorded (reported as "unknown line", not guessed).
@@ -204,7 +206,7 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 ## Layout
 
 ```
-tracepatch/   cli.py  interactive.py  orchestrator.py  dataref.py  gate1_tracer.py
+tracepatch/   cli.py  interactive.py  orchestrator.py  dataref.py  datafile.py  gate1_tracer.py
               _trace_child.py  gate2_ast.py  rewriter.py  gate3_sandbox.py
               _sandbox_child.py  gate3_oracle.py  watchdog.py
 demo/         clinvar_summary.py  clinvar_pathogenic.py  clinvar_median.py
@@ -212,9 +214,10 @@ demo/         clinvar_summary.py  clinvar_pathogenic.py  clinvar_median.py
               make_data.py  safe_pipeline.py  unsafe_pipeline.py
               terminal_demo.sh  app.py  web/        (optional walkthrough and web page)
 tests/        test_gate2.py  test_tracer.py  test_oracle.py  test_sandbox.py  test_rewriter.py
-              test_orchestrator.py  test_script_only.py  test_interactive.py
-              test_end_to_end.py  fixtures/
+              test_orchestrator.py  test_script_only.py  test_hardening.py
+              test_interactive.py  test_end_to_end.py  conftest.py  fixtures/
 docs/         LEARNING_GUIDE.md (everything explained from scratch)  DEMO_RUNBOOK.md
+              RISK_REVIEW.md (what could go wrong, and what was done about it)
 CONTRACT.md   interface between the two halves of the project
 ```
 

@@ -10,7 +10,6 @@ from tracepatch.dataref import find_data_ref, replace_literal_path
 from tracepatch.gate3_sandbox import extract_imports, verify_patch
 from tracepatch.orchestrator import auto_chunk_rows, run
 
-CAP_MB = 200  # 1M rows: eager read ~270 MB, chunked ~110 MB (measured)
 
 GLOBAL_STYLE = '''import pandas as pd
 
@@ -39,18 +38,6 @@ if __name__ == "__main__":
 '''
 
 
-@pytest.fixture(scope="module")
-def big_csv(tmp_path_factory):
-    n = 1_000_000
-    rng = np.random.default_rng(3)
-    path = tmp_path_factory.mktemp("data") / "variants.csv"
-    pd.DataFrame({"chrom": rng.choice(["chr1", "chr2", "chrX"], n),
-                  "pos": rng.integers(1, 2_000_000, n),
-                  "ref": rng.choice(list("ACGT"), n), "alt": rng.choice(list("ACGT"), n),
-                  "depth": rng.integers(1, 100, n)}).to_csv(path, index=False)
-    return str(path)
-
-
 def quiet(_):
     pass
 
@@ -72,19 +59,19 @@ def test_replace_literal_path_only_touches_the_loader():
 
 
 @pytest.mark.parametrize("style", [GLOBAL_STYLE, LITERAL_STYLE])
-def test_script_only_is_patched_and_verified(style, big_csv, tmp_path):
+def test_script_only_is_patched_and_verified(style, big_csv, tmp_path, cap_mb):
     script = tmp_path / "analysis.py"
     script.write_text(style.format(path=big_csv))
-    r = run(str(script), None, CAP_MB, out_dir=str(tmp_path / "out"), echo=quiet)
+    r = run(str(script), None, cap_mb, out_dir=str(tmp_path / "out"), echo=quiet)
     assert r.status == "verified", r.log
-    assert r.before_peak_mb > CAP_MB > r.after_peak_mb
+    assert r.before_peak_mb > cap_mb > r.after_peak_mb
     truth = pd.read_csv(big_csv)["depth"]
     assert str(truth.sum()) in r.patched_output and str(len(truth)) in r.patched_output
 
 
-def test_gate3_uses_the_sample_not_the_full_file(big_csv, tmp_path):
+def test_gate3_uses_the_sample_not_the_full_file(big_csv, tmp_path, cap_mb):
     # The original reads the FULL file by a path inside the code. In the sandbox it
-    # must be pointed at the 5,000-row sample: a 60 MB cap would kill a full read.
+    # must be pointed at the 5,000-row sample: a full read would break this cap.
     sample = tmp_path / "sample.csv"
     with open(big_csv) as src, open(sample, "w") as dst:
         for i, line in enumerate(src):
@@ -96,7 +83,7 @@ def test_gate3_uses_the_sample_not_the_full_file(big_csv, tmp_path):
     patched = ('def depth_summary():\n    n = 0\n'
                '    for c in pd.read_csv(DATA_FILE, chunksize=CHUNKSIZE):\n        n += len(c)\n    return n\n')
     v = verify_patch(original, patched, "depth_summary", str(sample), extract_imports(source),
-                     mem_limit_mb=150, data_ref=find_data_ref(source))
+                     mem_limit_mb=cap_mb, data_ref=find_data_ref(source))
     assert v["verified"], v
 
 
@@ -112,16 +99,16 @@ def test_patch_reading_a_different_file_is_rejected(big_csv, tmp_path):
     assert not v["verified"] and "does not read the data file" in v["diff"]
 
 
-def test_apply_replaces_script_and_keeps_backup(big_csv, tmp_path, capsys):
+def test_apply_replaces_script_and_keeps_backup(big_csv, tmp_path, capsys, cap_mb):
     script = tmp_path / "analysis.py"
     original = GLOBAL_STYLE.format(path=big_csv)
     script.write_text(original)
-    assert limit(str(script), [], CAP_MB) == 137            # before: killed
-    r = run(str(script), None, CAP_MB, out_dir=str(tmp_path / "out"), echo=quiet, apply=True)
+    assert limit(str(script), [], cap_mb) == 137            # before: killed
+    r = run(str(script), None, cap_mb, out_dir=str(tmp_path / "out"), echo=quiet, apply=True)
     assert r.status == "verified"
     assert (tmp_path / "analysis.py.orig").read_text() == original
     assert "chunksize=CHUNKSIZE" in script.read_text()
-    assert limit(str(script), [], CAP_MB) == 0               # after: finishes under the limit
+    assert limit(str(script), [], cap_mb) == 0               # after: finishes under the limit
     assert "Killed" in capsys.readouterr().out
 
 
