@@ -321,7 +321,7 @@ function onLog(line) {
   state.log.push(line);
   renderCode($("#tab-log"), state.log.join("\n"));
   let m;
-  if (line.startsWith("[Gate 1] tracing")) setStage("g1", "running", "running the original script…");
+  if (line.startsWith("[Gate 1] running")) setStage("g1", "running", "running the original script…");
   else if ((m = /^\[Gate 1\] KILLED at (\d+) MB.*line (\d+) in (\S+)/.exec(line))) {
     setStage("g1", "pass", `crash found: line ${m[2]} in ${m[3]} (${m[1]} MB)`);
     markSource({ [m[2]]: "fault" });

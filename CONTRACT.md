@@ -27,6 +27,8 @@ These override the Jul 24 sections below wherever they differ.
 | Gate 3 input | original + patched source + sample path | also `func_name` and `preamble` (the script's top-level imports) — see `verify_patch()` in `tracepatch/gate3_sandbox.py` |
 | Fixtures | `make_test_data.py`, `bad_script.py`, `bad_script_median.py` | `demo/make_data.py`, `demo/safe_pipeline.py`, `demo/unsafe_pipeline.py` |
 
+**Addition, Oct 12 (backward compatible):** Gate 3's `verify_patch()` takes an optional `data_ref` (from `tracepatch/dataref.py`) saying how the function gets its data file, so scripts with the path written inside can be tested on the sample. Without it, behaviour is as before.
+
 The dict shapes for each gate below are **unchanged** (Gate 2 success may add an extra `function_name` key).
 
 ---

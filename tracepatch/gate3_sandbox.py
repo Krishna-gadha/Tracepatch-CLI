@@ -29,6 +29,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from tracepatch.dataref import DataRef, replace_literal_path
 from tracepatch.gate3_oracle import oracle_verdict
 from tracepatch.watchdog import run_watched
 
@@ -59,13 +60,21 @@ def make_sample(data_path: str, out_path: str, n_rows: int = 5000) -> str:
     return out_path
 
 
+def _is_constant_assignment(node) -> bool:
+    return (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            and all(isinstance(t, ast.Name) for t in node.targets))
+
+
 def extract_imports(script_source: str) -> str:
-    """Top-level import lines of the original script, so an isolated
-    function still has `pd`, `np`, etc."""
+    """The script's top-level imports and simple constants (NAME = "text" or
+    a number), so an isolated function still has `pd` and names like DATA_FILE."""
     tree = ast.parse(script_source)
     lines = [ast.get_source_segment(script_source, n) for n in tree.body
-             if isinstance(n, (ast.Import, ast.ImportFrom))]
+             if isinstance(n, (ast.Import, ast.ImportFrom)) or _is_constant_assignment(n)]
     return "\n".join(lines) + "\n"
+
+
+SAMPLE_VARIABLE = "_TP_SAMPLE_PATH"  # used when the path is written inside read_csv("...")
 
 
 def clean_env() -> dict:
@@ -77,16 +86,28 @@ def clean_env() -> dict:
 
 def run_in_sandbox(source: str, func_name: str, sample_path: str,
                    chunksize: int = SANDBOX_CHUNKSIZE, timeout_s: float = 60,
-                   mem_limit_mb: float = 500) -> SandboxRun:
+                   mem_limit_mb: float = 500, data_ref: Optional[DataRef] = None) -> SandboxRun:
+    """data_ref says how the function gets its data file (see dataref.py).
+    Whatever the case, the function is made to read the SAMPLE copy."""
     workdir = tempfile.mkdtemp(prefix="tracepatch_sandbox_")
     try:
         local_sample = os.path.join(workdir, os.path.basename(sample_path))
         shutil.copy(sample_path, local_sample)
+        call_args, overrides = [local_sample], {}          # path passed as an argument
+        if data_ref is not None and data_ref.kind == "global":
+            call_args, overrides = [], {data_ref.name: local_sample}
+        elif data_ref is not None and data_ref.kind == "literal":
+            source, changed = replace_literal_path(source, data_ref.path, SAMPLE_VARIABLE)
+            if changed == 0:
+                return SandboxRun(False, error="code does not read the data file "
+                                               f"{data_ref.path!r} that the original reads")
+            call_args, overrides = [], {SAMPLE_VARIABLE: local_sample}
         job_path = os.path.join(workdir, "job.json")
         result_path = os.path.join(workdir, "result.json")
         with open(job_path, "w") as f:
-            json.dump({"source": source, "func_name": func_name, "data_path": local_sample,
-                       "result_path": result_path, "chunksize": chunksize}, f)
+            json.dump({"source": source, "func_name": func_name, "call_args": call_args,
+                       "overrides": overrides, "result_path": result_path,
+                       "chunksize": chunksize}, f)
 
         with open(os.path.join(workdir, "stdout.txt"), "w") as out_f, \
                 open(os.path.join(workdir, "stderr.txt"), "w") as err_f:
@@ -127,20 +148,21 @@ def _static_checks(patched_src: str, func_name: str) -> Optional[str]:
 
 
 def verify_patch(original_src: str, patched_src: str, func_name: str, sample_path: str,
-                 preamble: str = "", timeout_s: float = 60, mem_limit_mb: float = 500) -> dict:
+                 preamble: str = "", timeout_s: float = 60, mem_limit_mb: float = 500,
+                 data_ref: Optional[DataRef] = None) -> dict:
     """Gate 3 in the CONTRACT.md shape: {"verified", "reason", "diff"}."""
     reason = _static_checks(patched_src, func_name)
     if reason:
         return {"verified": False, "reason": reason, "diff": None}
 
     original = run_in_sandbox(preamble + original_src, func_name, sample_path,
-                              timeout_s=timeout_s, mem_limit_mb=mem_limit_mb)
+                              timeout_s=timeout_s, mem_limit_mb=mem_limit_mb, data_ref=data_ref)
     if not original.ok:
         return {"verified": False, "reason": "original code failed on the sample",
                 "diff": original.error}
 
     patched = run_in_sandbox(preamble + patched_src, func_name, sample_path,
-                             timeout_s=timeout_s, mem_limit_mb=mem_limit_mb)
+                             timeout_s=timeout_s, mem_limit_mb=mem_limit_mb, data_ref=data_ref)
     if patched.timed_out:
         return {"verified": False, "reason": "patched code timed out", "diff": None}
     if patched.killed_by_cap:

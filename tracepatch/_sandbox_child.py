@@ -23,7 +23,11 @@ def main():
         # A fresh namespace: the code sees only its own imports + CHUNKSIZE.
         namespace = {"__name__": "tracepatch_sandbox", "CHUNKSIZE": job["chunksize"]}
         exec(compile(job["source"], "<sandboxed>", "exec"), namespace)
-        result = namespace[job["func_name"]](job["data_path"])
+        # Set AFTER running the code, so a constant in the script cannot undo them:
+        # CHUNKSIZE stays small, and the data-file variable points at the sample.
+        namespace["CHUNKSIZE"] = job["chunksize"]
+        namespace.update(job["overrides"])
+        result = namespace[job["func_name"]](*job["call_args"])
         out = {"ok": True, "result": normalize(result)}
     except Exception:
         out = {"ok": False, "error": traceback.format_exc(limit=5)}

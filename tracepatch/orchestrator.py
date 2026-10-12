@@ -24,13 +24,24 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple, Union
 
+from tracepatch.dataref import find_data_ref
 from tracepatch.gate1_tracer import TraceResult, trace
 from tracepatch.gate2_ast import run_gate2
 from tracepatch.gate3_sandbox import clean_env, extract_imports, make_sample, verify_patch
 from tracepatch.rewriter import Rewriter, RewriteError, get_rewriter
 
 MAX_ATTEMPTS = 3          # hard cap; see module docstring
-FULL_CHUNKSIZE = 100_000  # rows per chunk in the real (full-scale) run
+FULL_CHUNKSIZE = 100_000  # most rows per chunk in the real (full-scale) run
+MIN_CHUNK_ROWS = 10_000
+TARGET_CHUNK_BYTES = 16 * 1024 * 1024  # aim for ~16 MB of file per chunk
+
+
+def auto_chunk_rows(size_bytes: int, rows: int) -> int:
+    """Rows per chunk from how wide the rows are: wide tables (many text
+    columns) need fewer rows per chunk, or one chunk alone is too big."""
+    bytes_per_row = size_bytes / max(rows, 1)
+    rows_per_chunk = round(TARGET_CHUNK_BYTES / bytes_per_row / 5000) * 5000  # tidy number
+    return int(max(MIN_CHUNK_ROWS, min(FULL_CHUNKSIZE, rows_per_chunk)))
 
 
 @dataclass
@@ -89,14 +100,20 @@ def _show_line(source: str, line_no: int) -> str:
     return ""
 
 
-def run(script: str, data: str, mem_limit_mb: float = 300,
+def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
         rewriter: Union[str, Rewriter] = "template", max_attempts: int = MAX_ATTEMPTS,
         sample_rows: int = 5000, out_dir: str = "tracepatch_out",
         timeout_s: Optional[float] = 600, echo: Callable[[str], None] = print,
-        chunk_rows: int = FULL_CHUNKSIZE) -> RunReport:
+        chunk_rows: Optional[int] = None, apply: bool = False) -> RunReport:
+    """chunk_rows=None picks the chunk size from the row width.
+    apply=True replaces the script with the verified patch (backup: <script>.orig)."""
     if not 1 <= max_attempts <= MAX_ATTEMPTS:
         raise ValueError(f"max_attempts must be between 1 and {MAX_ATTEMPTS}")
-    script, data = os.path.abspath(script), os.path.abspath(data)
+    # data is only needed when the script takes its data path as an argument.
+    # If the path is written inside the script, TracePatch reads it from there.
+    script = os.path.abspath(script)
+    data = os.path.abspath(data) if data else None
+    script_args = [data] if data else []
     rw = get_rewriter(rewriter) if isinstance(rewriter, str) else rewriter
     report = RunReport(status="failed", message="")
 
@@ -113,9 +130,9 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
         original_source = f.read()
 
     # ---- Gate 1: run the original and find where memory blows up.
-    say(f"[Gate 1] tracing {os.path.basename(script)} on {os.path.basename(data)} "
-        f"with a {mem_limit_mb:.0f} MB cap ...")
-    t = trace(script, [data], mem_limit_mb, timeout_s)
+    on = f" on {os.path.basename(data)}" if data else ""
+    say(f"[Gate 1] running {os.path.basename(script)}{on} with a {mem_limit_mb:.0f} MB memory cap ...")
+    t = trace(script, script_args, mem_limit_mb, timeout_s)
     report.before_peak_mb = t.peak_mb
     report.before_samples = _mb_samples(t)
     if t.timed_out:
@@ -138,7 +155,6 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
 
     workdir = tempfile.mkdtemp(prefix="tracepatch_run_")
     try:
-        sample = make_sample(data, os.path.join(workdir, "sample.csv"), sample_rows)
         current_source, fault_line, feedback = original_source, t.peak_line, None
 
         for attempt in range(1, max_attempts + 1):
@@ -154,6 +170,26 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             func_name, segment = g2["function_name"], g2["source_segment"]
             say(f"[Gate 2] {func_name}(): every call is on the chunk-safe allowlist -> OK")
 
+            # ---- Which data file does this function load? (needed for the sample)
+            ref = find_data_ref(current_source, func_name)
+            if ref is None:
+                return finish("failed", f"could not tell which data file {func_name}() loads")
+            if ref.kind == "param":
+                if not data:
+                    return finish("failed", f"{func_name}() takes its data file as an argument; "
+                                            "give the file with --data")
+                data_path = data
+            else:
+                data_path = os.path.abspath(ref.path)  # relative to where you run from
+                if attempt == 1:
+                    say(f"[Data]   {func_name}() reads {ref.path} (path written in the script)")
+            if not os.path.isfile(data_path):
+                return finish("failed", f"data file not found: {data_path}")
+            sample = make_sample(data_path, os.path.join(workdir, "sample.csv"), sample_rows)
+            with open(sample, "rb") as f:
+                sample_lines = max(sum(1 for _ in f) - 1, 1)
+            rows_per_chunk = chunk_rows or auto_chunk_rows(os.path.getsize(sample), sample_lines)
+
             # ---- Rewrite.
             try:
                 patched_func = rw.rewrite(segment, func_name, feedback)
@@ -163,11 +199,12 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
                     hint = "\n  (set ANTHROPIC_API_KEY and use --rewriter auto to let Claude try)"
                 return finish("failed", f"{rw.name} rewriter could not rewrite {func_name}(): {e}{hint}")
             who = getattr(rw, "used", None) or rw.name
-            say(f"[Rewrite] {who} rewriter produced a chunked {func_name}()")
+            say(f"[Rewrite] {who} rewriter produced a chunked {func_name}() "
+                f"({rows_per_chunk:,} rows at a time)")
 
             # ---- Gate 3: same answer as the original on a sample?
             preamble = extract_imports(current_source)
-            g3 = verify_patch(segment, patched_func, func_name, sample, preamble)
+            g3 = verify_patch(segment, patched_func, func_name, sample, preamble, data_ref=ref)
             if not g3["verified"]:
                 detail = f"{g3['reason']}" + (f": {g3['diff']}" if g3["diff"] else "")
                 say(f"[Gate 3] REJECTED: {detail.strip()[:500]}")
@@ -179,16 +216,18 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             say(f"[Gate 3] sandbox on a {sample_rows:,}-row sample: outputs match -> OK")
 
             # ---- Full-scale verification of the whole patched script.
-            # chunk_rows: wide tables (many text columns) need smaller chunks.
             candidate = ensure_chunksize(splice_function(current_source, func_name, patched_func),
-                                         chunk_rows)
+                                         rows_per_chunk)
             cand_path = os.path.join(workdir, os.path.basename(script))
             with open(cand_path, "w") as f:
                 f.write(candidate)
             say(f"[Verify] full-scale run of the patched script, tracer attached, "
                 f"{mem_limit_mb:.0f} MB cap ...")
-            full: TraceResult = trace(cand_path, [data], mem_limit_mb, timeout_s,
-                                      env=clean_env(), cwd=workdir)
+            # A path written inside the script may be relative, so that kind of
+            # script must run from the same folder as the original did.
+            full: TraceResult = trace(cand_path, script_args, mem_limit_mb, timeout_s,
+                                      env=clean_env(),
+                                      cwd=workdir if ref.kind == "param" else os.getcwd())
             report.after_peak_mb = full.peak_mb
             report.after_samples = _mb_samples(full)
 
@@ -212,18 +251,30 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             report.patched_output = full.stdout.strip()
             shown_output = report.patched_output.replace("\n", "\n" + " " * 17)
             _write_outputs(report, script, original_source, candidate, out_dir)
+            applied = ""
+            if apply:
+                apply_patch(script, candidate)
+                applied = (f"\n  applied:       {os.path.relpath(script)} now contains the repair "
+                           f"(original kept as {os.path.basename(script)}.orig)")
             return finish("verified",
                           f"{report.patch_path}\n"
                           f"  memory before: killed at the {mem_limit_mb:.0f} MB cap "
                           f"(reached {report.before_peak_mb:.0f} MB)\n"
                           f"  memory after:  {report.after_peak_mb:.0f} MB peak on the full file\n"
                           f"  diff:          {report.diff_path}\n"
-                          f"  output:        {shown_output}")
+                          f"  output:        {shown_output}{applied}")
 
         return finish("failed", f"no memory-safe, verified patch after {max_attempts} attempts "
                                 f"(last problem: {feedback})")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def apply_patch(script: str, patched_source: str):
+    """Replace the script with the verified patch; keep the original as .orig."""
+    shutil.copy(script, script + ".orig")
+    with open(script, "w") as f:
+        f.write(patched_source)
 
 
 def _mb_samples(t: TraceResult) -> List[Tuple[float, float]]:
