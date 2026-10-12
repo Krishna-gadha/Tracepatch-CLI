@@ -15,8 +15,8 @@ the subprocess can still read files or use the network. Docker/seccomp
 would be needed for that and is out of scope.
 
 CHUNKSIZE contract: patched code must call read_csv(..., chunksize=CHUNKSIZE).
-The sandbox sets CHUNKSIZE small, so even a small sample is split into
-several chunks and the chunk-merging logic is really exercised.
+The sandbox sets CHUNKSIZE small (and uneven), so even a small sample is split
+into several chunks of different sizes and the merging logic is really exercised.
 """
 
 import ast
@@ -36,7 +36,11 @@ from tracepatch.gate3_oracle import compare_printed, oracle_verdict
 from tracepatch.watchdog import run_watched
 
 CHILD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_sandbox_child.py")
-SANDBOX_CHUNKSIZE = 1000
+# Deliberately NOT a divisor of the 5,000-row sample: 997 gives five full chunks
+# and one small one. Some wrong rewrites (for example averaging the chunk
+# averages) give the right answer when every chunk has the same size, and only
+# go wrong when the last chunk is smaller, as it is on a real file.
+SANDBOX_CHUNKSIZE = 997
 ORIGINAL_FAILED = "original code failed on the sample"
 SAFE_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT")
 PLACEHOLDER = re.compile(r"\bTODO\b|\bFIXME\b|NotImplementedError|^\s*\.\.\.\s*$", re.MULTILINE)

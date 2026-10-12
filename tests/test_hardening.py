@@ -218,3 +218,44 @@ def test_template_keeps_len_as_a_plain_int(sample):
     src = "def f(path):\n    df = pd.read_csv(path)\n    return isinstance(len(df), int), len(df)\n"
     patched = TemplateRewriter().rewrite(src, "f")
     assert verify_patch(src, patched, "f", sample, PREAMBLE)["verified"]
+
+
+def test_averaging_the_chunk_averages_is_caught(sample):
+    # Wrong on real files (the last chunk is smaller), but RIGHT when every
+    # chunk has the same size. The sandbox's uneven chunk size exposes it.
+    original = "def f(path):\n    df = pd.read_csv(path)\n    return df['depth'].sum() / len(df)\n"
+    wrong = ("def f(path):\n    means = []\n"
+             "    for c in pd.read_csv(path, chunksize=CHUNKSIZE):\n"
+             "        means.append(c['depth'].sum() / len(c))\n"
+             "    return sum(means) / len(means)\n")
+    v = verify_patch(original, wrong, "f", sample, PREAMBLE)
+    assert not v["verified"] and v["reason"] == "output mismatch"
+    right = ("def f(path):\n    total, rows = 0, 0\n"
+             "    for c in pd.read_csv(path, chunksize=CHUNKSIZE):\n"
+             "        total += c['depth'].sum()\n        rows += len(c)\n"
+             "    return total / rows\n")
+    assert verify_patch(original, right, "f", sample, PREAMBLE)["verified"]
+
+
+def test_function_that_returns_the_whole_table_is_explained():
+    src = "import pandas as pd\nD = 'x.csv'\ndef load():\n    df = pd.read_csv(D)\n    return df\n"
+    assert "returns the whole table" in uncallable_reason(src, "load", find_data_ref(src, "load"))
+    direct = "import pandas as pd\ndef load(p):\n    return pd.read_csv(p)\n"
+    assert "returns the whole table" in uncallable_reason(direct, "load", find_data_ref(direct, "load"))
+
+
+def test_second_load_in_the_same_function_fails_clearly(big_csv, tmp_path):
+    script = tmp_path / "two.py"
+    script.write_text(f'import pandas as pd\n\nDATA = {big_csv!r}\n\n\ndef both():\n'
+                      '    a = pd.read_csv(DATA)\n    total = a["depth"].sum()\n'
+                      '    b = pd.read_csv(DATA)\n    return total, len(b)\n\n\nprint(both())\n')
+    r = run(str(script), None, CAP_MB, out_dir=str(tmp_path / "out"), echo=quiet)
+    assert r.status == "failed" and "one load per function" in r.message
+    assert not (tmp_path / "out").exists()  # nothing accepted, nothing written
+
+
+def test_web_address_and_flat_script_messages(big_csv, tmp_path):
+    flat = tmp_path / "flat.py"
+    flat.write_text(f'import pandas as pd\ndf = pd.read_csv({big_csv!r})\nprint(len(df))\n')
+    r = run(str(flat), None, CAP_MB, out_dir=str(tmp_path / "out"), echo=quiet)
+    assert r.status == "refused" and "inside a function" in r.message and "def main()" in r.message

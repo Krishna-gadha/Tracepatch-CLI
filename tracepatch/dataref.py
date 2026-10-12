@@ -99,6 +99,18 @@ def uncallable_reason(script_source: str, func_name: str, ref: DataRef) -> Optio
                  if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
     if func is None:
         return f"function {func_name}() not found"
+    # A function that hands back the whole table cannot be helped by chunking:
+    # whoever calls it still gets (and holds) every row.
+    loaded = {n.targets[0].id for n in ast.walk(func)
+              if isinstance(n, ast.Assign) and len(n.targets) == 1
+              and isinstance(n.targets[0], ast.Name) and is_loader_call(n.value)}
+    for node in ast.walk(func):
+        if isinstance(node, ast.Return) and node.value is not None and (
+                is_loader_call(node.value)
+                or (isinstance(node.value, ast.Name) and node.value.id in loaded)):
+            return (f"{func_name}() returns the whole table it loads, so reading it in chunks cannot "
+                    "save memory: the caller still receives every row. Do the calculation in the "
+                    "same function as the loading, and return the result instead of the table")
     args = func.args
     positional = args.posonlyargs + args.args
     required = [a.arg for a in positional[:len(positional) - len(args.defaults)]]

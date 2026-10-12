@@ -131,7 +131,7 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
         say(("VERIFIED PATCH: " if status == "verified" else f"{status.upper()}: ") + message)
         return report
 
-    with open(script) as f:
+    with open(script, encoding="utf-8") as f:  # Python source is UTF-8
         original_source = f.read()
 
     # ---- Gate 1: run the original and find where memory blows up.
@@ -180,9 +180,19 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                                       f"the {mem_limit_mb:.0f} MB limit was reached while the script was still "
                                       f"importing its libraries (line {fault_line}). Python and pandas need "
                                       f"roughly 100 MB before a script does anything: use a higher limit")
+                    if attempt > 1:
+                        # We are looking at our own repaired script: it still has a
+                        # second big load that the first repair did not cover.
+                        return finish("failed",
+                                      f"the repaired script still used too much memory at line {fault_line}:\n"
+                                      f"  {_show_line(current_source, fault_line).strip()}\n"
+                                      "  TracePatch repairs one load per function. Nothing was accepted")
                     say(f"[Gate 2] REFUSED: {g2['reason']}")
-                    what = "nothing was rewritten" if attempt == 1 else "stopping"
-                    return finish("refused", f"{g2['reason']}; {what}")
+                    hint = ""
+                    if "module level" in g2["reason"]:
+                        hint = ("\n  Put the loading and the calculation inside a function "
+                                "(for example `def main():`) and call it")
+                    return finish("refused", f"{g2['reason']}; nothing was rewritten{hint}")
                 func_name, segment = g2["function_name"], g2["source_segment"]
                 say(f"[Gate 2] {func_name}(): every call is on the chunk-safe allowlist -> OK")
 
@@ -200,8 +210,12 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                         return finish("failed", f"{func_name}() takes its data file as an argument; "
                                                 "give the file with --data")
                     data_path = data
+                elif "://" in ref.path:
+                    return finish("failed", f"{func_name}() reads its data from a web address ({ref.path}); "
+                                            "download the file and point the script at the local copy")
                 else:
-                    data_path = os.path.abspath(ref.path)  # relative to where you run from
+                    # Relative to where you run from; "~" means the home folder, as in pandas.
+                    data_path = os.path.abspath(os.path.expanduser(ref.path))
                     if attempt == 1:
                         say(f"[Data]   {func_name}() reads {ref.path} (path written in the script)")
                 if not os.path.isfile(data_path):
@@ -263,7 +277,7 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
             candidate = ensure_chunksize(splice_function(current_source, func_name, patched_func),
                                          rows_per_chunk, replace=True)
             cand_path = os.path.join(workdir, os.path.basename(script))
-            with open(cand_path, "w") as f:
+            with open(cand_path, "w", encoding="utf-8") as f:
                 f.write(candidate)
             say(f"[Verify] full-scale run of the patched script, tracer attached, "
                 f"{mem_limit_mb:.0f} MB cap ...")
