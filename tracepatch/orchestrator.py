@@ -194,12 +194,17 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
             try:
                 patched_func = rw.rewrite(segment, func_name, feedback)
             except RewriteError as e:
+                if e.retryable and attempt < max_attempts:
+                    # The model gave an unusable answer: tell it why and ask again.
+                    say(f"[Rewrite] REJECTED: {e}")
+                    feedback = str(e)
+                    continue
                 hint = ""
-                if rw.name == "template" and not os.environ.get("ANTHROPIC_API_KEY"):
-                    hint = "\n  (set ANTHROPIC_API_KEY and use --rewriter auto to let Claude try)"
-                return finish("failed", f"{rw.name} rewriter could not rewrite {func_name}(): {e}{hint}")
-            who = getattr(rw, "used", None) or rw.name
-            say(f"[Rewrite] {who} rewriter produced a chunked {func_name}() "
+                if rw.name == "template":
+                    hint = ("\n  (use --rewriter auto to let an LLM try: Claude with "
+                            "ANTHROPIC_API_KEY set, or a local Ollama model)")
+                return finish("failed", f"{rw.label} could not rewrite {func_name}(): {e}{hint}")
+            say(f"[Rewrite] {rw.label} produced a chunked {func_name}() "
                 f"({rows_per_chunk:,} rows at a time)")
 
             # ---- Gate 3: same answer as the original on a sample?

@@ -144,6 +144,10 @@ def _static_checks(patched_src: str, func_name: str) -> Optional[str]:
     used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     if "CHUNKSIZE" not in used:
         return "patched code does not use chunksize=CHUNKSIZE, so the oracle cannot test chunk merging"
+    # A patch that sets CHUNKSIZE itself would undo the sandbox's small chunks.
+    if any(isinstance(n, ast.Name) and n.id == "CHUNKSIZE" and isinstance(n.ctx, ast.Store)
+           for n in ast.walk(tree)):
+        return "patched code assigns CHUNKSIZE itself; it must use the CHUNKSIZE it is given"
     return None
 
 
