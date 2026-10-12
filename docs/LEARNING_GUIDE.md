@@ -579,12 +579,12 @@ hold only one small number per chunk.
 - **Shared code:** `build_prompt()` writes the question (and adds the rejection
   reason on a retry); `clean_answer()` strips fences, recognises `CANNOT_CHUNK`
   and checks the answer is valid Python.
-- **Status: run live.** These are real results on the ClinVar file:
+- **Status: run live.** The real results on the ClinVar file are in the table below.
 
-  | Script | What the local model did | Outcome |
-  |---|---|---|
-  | `clinvar_needs_llm.py` (filter rows, then sum) | wrote a correct chunked loop | **VERIFIED**: 563,725 submissions, identical to plain pandas; 193 MB |
-  | `clinvar_llm_rejected.py` (max and min of filtered rows) | wrote a wrong loop | **REJECTED** by Gate 3 three times ("expected 34.0, got 5000.0"), then `FAILED`; nothing accepted |
+| Script | What the local model did | Outcome |
+|---|---|---|
+| `clinvar_needs_llm.py` (filter rows, then sum) | wrote a correct chunked loop | **VERIFIED**: 563,725 submissions, identical to plain pandas; 193 MB |
+| `clinvar_llm_rejected.py` (max and min of filtered rows) | wrote a wrong loop | **REJECTED** by Gate 3 three times ("expected 34.0, got 5000.0"), then `FAILED`; nothing accepted |
 
 A small local model is weaker than Claude, and that is fine: the design never
 depended on the model being right.
