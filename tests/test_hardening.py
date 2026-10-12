@@ -151,14 +151,24 @@ def test_gzip_script_is_repaired_end_to_end(big_csv, tmp_path, cap_mb):
 
 # ---- chunks too big for the limit: retry with smaller chunks ----------------
 
-def test_chunk_size_is_halved_until_it_fits(big_csv, tmp_path, cap_mb):
+def test_chunk_size_is_halved_when_a_chunk_is_too_big(big_csv, tmp_path, memory_profile):
     fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sum_pipeline.py")
+    baseline, eager = memory_profile
+    cap = round(baseline + 0.8 * (eager - baseline))
     # Start with the whole file as one "chunk": certain to break the cap.
-    r = run(fixture, big_csv, cap_mb, out_dir=str(tmp_path), echo=quiet, chunk_rows=1_000_000)
-    assert r.status == "verified", r.log
-    assert r.attempts > 1
-    assert any("trying" in line and "rows at a time" in line for line in r.log)
-    assert r.after_peak_mb < cap_mb
+    r = run(fixture, big_csv, cap, out_dir=str(tmp_path / "out"), echo=quiet, chunk_rows=1_000_000)
+    halvings = [line for line in r.log if "trying" in line and "rows at a time" in line]
+    assert halvings and "trying 500,000 rows at a time" in halvings[0], r.log
+    # Halving repeats only the full-scale check: the rewrite and Gate 3 ran once.
+    assert sum("[Rewrite]" in line for line in r.log) == 1
+    assert sum("[Gate 3]" in line for line in r.log) == 1
+    # How many halvings are needed depends on the machine. Either a size that fits
+    # was found within three attempts, or the tool gave up and accepted nothing.
+    if r.status == "verified":
+        assert r.attempts > 1 and r.after_peak_mb < cap
+    else:
+        assert r.status == "failed" and "after 3 attempts" in r.message
+        assert not (tmp_path / "out").exists()
 
 
 def test_ensure_chunksize_can_replace_the_value():

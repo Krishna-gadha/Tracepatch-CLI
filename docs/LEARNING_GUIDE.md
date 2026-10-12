@@ -5,7 +5,8 @@ nothing. Read it top to bottom once (about an hour), with the code open beside
 it. Every section names the file it is about.
 
 For the review itself, use the short **[demo runbook](DEMO_RUNBOOK.md)**: what to
-type and what to say, in order.
+type and what to say, in order. Everything that could go wrong, and what was
+done about it, is in the **[risk review](RISK_REVIEW.md)**.
 
 **Contents**
 
@@ -275,6 +276,7 @@ tracepatch/             the tool itself (a Python package)
   cli.py                command-line arguments → orchestrator.run()
   interactive.py        interactive mode: asks for the script, finds its dataset
   dataref.py            finds which data file a function loads (from the code)
+  datafile.py           reads data files safely: bytes only, compressed files, sampling
   orchestrator.py       runs every stage in order; retry loop; writes the patch
   gate1_tracer.py       Gate 1, parent side: starts the script, reads samples
   _trace_child.py       Gate 1, child side: runs the script + samples line/RSS
@@ -298,11 +300,14 @@ demo/
   terminal_demo.sh      optional narrated step-by-step walkthrough
   app.py, web/          optional local web page over the same pipeline
 
-tests/                  66 automated tests (see section 13)
+tests/                  90 automated tests (see section 13)
+  conftest.py           shared test data, and a memory limit measured on the test machine
   fixtures/             small scripts the tests run
 
 docs/LEARNING_GUIDE.md  this file
 docs/DEMO_RUNBOOK.md    what to type and say in the review, in order
+docs/RISK_REVIEW.md     what could go wrong, and what was done about each thing
+.github/workflows/      runs the tests automatically on Linux and macOS
 ```
 
 Files starting with `_` (like `_trace_child.py`) are helpers that run **inside
@@ -478,8 +483,10 @@ which one it uses. `get_rewriter("template" | "llm" | "auto")` picks one;
 ### The CHUNKSIZE contract
 
 Every rewrite must use `read_csv(..., chunksize=CHUNKSIZE)`: the **name**
-`CHUNKSIZE`, not a number. Gate 3 sets it to 1,000 (so a 5,000-row sample is split
-into 5 chunks) and the final script sets it to 100,000. Section 14 explains why.
+`CHUNKSIZE`, not a number, and it must not set `CHUNKSIZE` itself. Gate 3 sets it
+to **997**, so a 5,000-row sample is split into five full chunks and one small
+one; the final script sets a size chosen from the row width. Section 14 explains
+why the size is small and why it is deliberately uneven.
 
 ### TemplateRewriter (no internet, the demo default)
 
@@ -584,7 +591,7 @@ hold only one small number per chunk.
 | Script | What the local model did | Outcome |
 |---|---|---|
 | `clinvar_needs_llm.py` (filter rows, then sum) | wrote a correct chunked loop | **VERIFIED**: 563,725 submissions, identical to plain pandas; 193 MB |
-| `clinvar_llm_rejected.py` (max and min of filtered rows) | wrote a wrong loop | **REJECTED** by Gate 3 three times ("expected 34.0, got 5000.0"), then `FAILED`; nothing accepted |
+| `clinvar_llm_rejected.py` (max and min of filtered rows) | wrote a wrong loop | **REJECTED** by Gate 3 three times ("expected 27.0, got 5000.0"), then `FAILED`; nothing accepted |
 
 A small local model is weaker than Claude, and that is fine: the design never
 depended on the model being right.
@@ -639,7 +646,7 @@ Real run, `python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter aut
 
 ```
 [Rewrite] local LLM (llama3.2) produced a chunked benign_evidence() (25,000 rows at a time)
-[Gate 3] REJECTED: output mismatch: value mismatch at result[0]: expected 34.0, got 5000.0
+[Gate 3] REJECTED: output mismatch: value mismatch at result[0]: expected 27.0, got 5000.0
    (the same on attempts 2 and 3)
 FAILED: no memory-safe, verified patch after 3 attempts (last problem: output mismatch: ...)
 ```
@@ -747,6 +754,35 @@ rejects it ("code does not read the data file … that the original reads").
 `extract_imports()` also copies simple constants from the top of the script, so
 names like `DATA_FILE` exist inside the sandbox.
 
+**What Gate 3 compares.** Two things, both of which must match:
+
+1. **What the function returns**, with the tolerance rules above.
+2. **What the function prints.** The sandbox captures the function's output.
+   `compare_printed()` compares it line by line: numbers with the same
+   tolerance, every other word exactly. Many analysis functions print their
+   result instead of returning it; without this, `None` would be compared with
+   `None` and anything would "match".
+
+If a function neither returns nor prints anything, Gate 3 answers
+`nothing to verify`. It never calls that verified.
+
+**Rewritten code may only use a fixed vocabulary.** Before a patch is run at
+all, `disallowed_in_patch()` (in `gate2_ast.py`) checks every call in it. Allowed:
+the chunk-safe methods, the loaders, the safe builtins, and a short list of
+helpers for collecting and merging partial results (`append`, `Series`, `concat`,
+`min`, `max`, `sum`, …). Anything else — `open`, `eval`, `exec`, `__import__`,
+`to_csv`, an extra `import`, a statement outside the function — is rejected
+**without being run**. A test proves the file such a patch would create is never created.
+
+**The sample.** `datafile.make_sample()` writes the header plus 5,000 rows taken
+from **five places across the file** (start to end), so a problem that only
+appears late in the file can still be seen. It works on bytes, so a file that
+is not UTF-8 cannot break it. Compressed files (`.gz`, `.bz2`, `.xz`) are
+recognised from their first bytes; for those the first 5,000 rows are used
+(a compressed stream cannot be jumped into), and the sample is written with the
+same compression. If the original cannot run on the spread sample (a row cut in
+half inside a quoted value), Gate 3 retries with the first rows.
+
 ---
 
 ## 9. The watchdog (shared by Gate 1 and Gate 3)
@@ -781,7 +817,8 @@ This connects everything. In order:
    - not killed but crashed → `failed` ("crashed for a non-memory reason"), with the error text;
    - killed but the line is unknown → `failed`;
    - killed with a line → it prints the line and continues.
-2. **Makes a sample** (first 5,000 rows) in a temp folder.
+2. **Makes a sample** (5,000 rows from across the file) in a temp folder, once the
+   data file is known.
 3. **Loop**, `attempt = 1, 2, 3` (never more; `MAX_ATTEMPTS = 3`):
    1. **Gate 2** on the current source at the fault line. If refused → `refused`, stop.
    2. **Rewrite.** If it raises `RewriteError` → `failed`.
@@ -842,6 +879,26 @@ reports the last line of the error and a hint, and stops:
 FAILED: the script itself failed before any memory problem (exit 1): pandas.errors.ParserError: ...
   (is this the right dataset for this script?)
 ```
+
+**Checks before any rewriting.** `uncallable_reason()` gives a clear reason when
+the function could never be tested on its own: it is a method of a class, it
+needs other arguments, or it **returns the whole table it loads** (then chunking
+cannot help, because the caller still receives every row).
+
+**When a chunk is still too big.** If the full-scale run is killed *while
+reading a chunk*, the answer has already been verified by Gate 3; only the chunk
+is too large. The orchestrator halves the chunk size and repeats **only the
+full-scale check** (no new rewrite), down to 1,000 rows and within the three
+attempts:
+
+```
+[Verify] still spiked: 153 MB while reading a chunk of 25,000 rows; trying 12,500 rows at a time
+[Verify] still spiked: 152 MB while reading a chunk of 12,500 rows; trying 6,250 rows at a time
+[Verify] peak 116 MB, under the 150 MB cap -> OK
+```
+
+If the kill happens somewhere else, the old rule applies: that line is a new
+fault and goes back through Gate 2.
 
 ---
 
@@ -1062,10 +1119,11 @@ All are allowed. TracePatch then reads from the code which file the function loa
 
 ```
 [Rewrite] template rewriter produced a chunked clinvar_summary() (25,000 rows at a time)
-[Gate 3] sandbox on a 5,000-row sample: outputs match -> OK
+[Gate 3] sandbox on a 5,000-row sample taken from across the file: outputs match -> OK
 ```
-The original and the rewritten function both ran on the first 5,000 rows (the
-rewritten one in 5 chunks of 1,000). The oracle found the same result.
+The original and the rewritten function both ran on 5,000 rows taken from five
+places in the file (the rewritten one in six chunks of uneven size). The oracle
+found the same result.
 
 ```
 [Verify] full-scale run of the patched script, tracer attached, 500 MB cap ...
@@ -1155,7 +1213,7 @@ Neither adds logic. **The project is the CLI.**
 
 ## 13. The tests
 
-Run all of them with `python3 -m pytest` (66 tests, about 20 s). Add `-v` to see each name.
+Run all of them with `python3 -m pytest` (90 tests, about 35 s). Add `-v` to see each name.
 
 | File | Count | What it proves |
 |---|---|---|
@@ -1165,6 +1223,7 @@ Run all of them with `python3 -m pytest` (66 tests, about 20 s). Add `-v` to see
 | `test_sandbox.py` | 10 | **a patch that sets `CHUNKSIZE` itself is rejected**; good patch verified; **"keeps only the last chunk" bug caught**; missing CHUNKSIZE rejected; TODO rejected; exception; timeout; memory cap; **API key not leaked**; sample/imports helpers |
 | `test_rewriter.py` | 15 | a bad model answer is retryable but `CANNOT_CHUNK` is not; an unreachable local model fails clearly; `auto` picks template / local / Claude correctly; template output **verified by Gate 3**; repeated expression computed once; **rows matching a condition counted correctly**; filter-then-sum refused; unsupported use refused; no loader; already chunked; LLM with fake client: fences stripped, feedback sent, refusal / CANNOT_CHUNK / bad Python, no key; **Claude only called when the template can't** |
 | `test_orchestrator.py` | 7 | full pipeline verified on 1M rows (output = uncapped pandas); median refused, nothing written; module-level refused; no problem under cap; **retry loop stops at exactly 3**; cap can't be raised; splice helpers |
+| `test_hardening.py` | 24 | every problem found in the risk review: printed output is compared; a silent function is not "verified"; unsafe patches are rejected **without running**; averaging chunk averages is caught; gzip and non-UTF-8 data; the sample spans the file; chunk size is halved until it fits; clear reasons (class method, extra arguments, returns the whole table, flat script, limit too low); the backup is never overwritten |
 | `test_interactive.py` | 2 | dragged-in paths (quoted, escaped spaces) are cleaned; chunk size follows row width |
 | `test_script_only.py` | 9 | the three ways a script can name its data file are recognised; a script with the path inside is **repaired with no `--data`**; **Gate 3 really uses the sample** (a full read would break a 150 MB cap); a patch that reads a different file is rejected; `--apply` keeps a backup and the script then **survives the same limit that killed it** |
 | `test_end_to_end.py` | 2 | the real demo files through the real CLI |
@@ -1190,6 +1249,13 @@ check keeps failing). That proves the loop really stops after 3 attempts.
 
 The tests use **generated** data, so they need no download and no internet.
 
+**The memory limit in the tests is measured, not fixed** (`tests/conftest.py`).
+How much memory pandas needs depends on the operating system and the pandas
+version, so a fixed "200 MB" was right on our laptop and wrong on GitHub's
+Linux machines. The tests now measure the eager peak and the baseline on
+whatever machine runs them and set the limit between the two. They also run
+automatically on Linux and macOS for every change (`.github/workflows/tests.yml`).
+
 ---
 
 ## 14. Bugs we found along the way (good viva stories)
@@ -1210,8 +1276,7 @@ With a 5,000-row sample and chunks of 100,000, the whole sample fits in **one
 chunk**, so the code that *merges* chunk results is never exercised. A patch
 that keeps only the last chunk's sum would wrongly pass. The fix is the
 **CHUNKSIZE contract**: patches must use the name `CHUNKSIZE`, which the sandbox
-sets to 1,000 (5 chunks). The test `test_last_chunk_bug_is_caught` proves the
-bug is now caught.
+sets small. The test `test_last_chunk_bug_is_caught` proves the bug is now caught.
 
 **3. The Gate 2 blocklist defaulted to "safe".** We replaced it with an allowlist
 (section 2.6).
@@ -1235,40 +1300,60 @@ sample fit in one chunk again, so the merging logic would go untested (the same
 problem as bug 2). Gate 3 now rejects any patch that assigns `CHUNKSIZE`, and a
 test covers it. We only found this by running a real model, not a mock.
 
+**6. A function that prints was "verified" without being checked.**
+During the risk review we gave TracePatch a function that prints its total
+instead of returning it. Gate 3 compared what the two versions *returned*:
+`None` and `None`. It said "outputs match". Nothing had been compared. Gate 3
+now captures and compares what the function prints, and refuses to say
+"verified" when there is nothing to compare.
+
+**7. Equal test chunks hid a classic wrong answer.**
+A rewrite that averages the chunk averages is wrong on real files, where the
+last chunk is smaller. But our sandbox split 5,000 rows into 5 chunks of exactly
+1,000, and with equal chunks that wrong formula gives the right answer. The
+sandbox chunk size is now 997, so the last chunk is small and the error shows.
+
+**8. Our own tests assumed our own laptop.**
+The tests used a fixed 200 MB limit. On GitHub's Linux machines, with a newer
+pandas, loading the same file needs only 130–198 MB, so nothing was ever killed
+and 13 tests failed. The tests now measure the limit on the machine they run on.
+The general lesson: a number measured on one machine is not a constant.
+
+The full list of what was tried and fixed is in [RISK_REVIEW.md](RISK_REVIEW.md).
+
 ---
 
 ## 15. Honest limits
 
-Say these before the panel finds them:
+Say these before the panel finds them. Each one ends in a clear message, not in
+a wrong answer; the [risk review](RISK_REVIEW.md) shows how.
 
-- **The allowlist is small** (8 methods + 6 builtins) and matches by name, not type.
-- **The template only handles simple aggregations**: sum / count / min / max of a
-  column, `len`, and counting rows that match one condition. It refuses
-  everything else, such as filtering rows and then aggregating.
-- **The LLM has been run live only with a small local model** (`llama3.2`
-  through Ollama). It repaired one script correctly and got another wrong, which
-  the gates rejected. **The Claude rewriter has never made a live call** (it
-  needs a paid API key); it is tested with a fake client.
-- **We have not measured how often an LLM succeeds.** Two scripts are examples,
-  not an evaluation.
-- **Sample-based checking is not a proof.** Gate 3 uses the first 5,000 rows, not
-  a random sample.
-- **The full-scale run proves memory, not correctness** (the original never
-  finishes under the cap, so there is no full answer to compare against).
-- **The loading must be inside a function.** A script that calls `read_csv` at
-  the top level, outside any function, is refused.
-- **The data path must be simple**: written in the `read_csv` call, a constant at
-  the top of the script, or the function's argument. A path built at run time
-  (for example joined from several parts) is not recognised.
-- **The chunk size is estimated from the row width**, not tuned from the memory
-  cap. If the estimate is too large, the full-scale check rejects the patch.
-- **The sandbox isolates processes; it is not a security boundary.**
+- **The LLM is a small local model** (`llama3.2` through Ollama). It repaired
+  one script correctly and got another wrong, which the gates rejected. **The
+  Claude rewriter has never made a live call** (it needs a paid API key); it is
+  tested with a fake client. Two scripts are examples, not an evaluation.
+- **Sample-based checking is not a proof.** The sample is 5,000 rows from across
+  the file. The original cannot finish on the full file, so there is no full
+  answer to compare with.
+- **The full-scale run proves memory, not correctness.**
+- **Only operations known to be chunk-safe are repaired.** The allowlist is small
+  (8 methods + 6 builtins) and matches by name. `median`, `sort_values`,
+  `groupby`, `mean()` and anything unrecognised are refused.
+- **The loading must be inside a function that returns or prints its result.** A
+  flat script, a class method, or a function that returns the whole table is
+  refused or fails with an explanation of how to restructure it.
+- **One load per function.**
+- **The data path must be simple**: in the `read_csv` call, a constant at the top
+  of the script, or the function's argument. A path built at run time is refused.
+- **Only the script's own process is measured**, not processes it starts.
+- **The sandbox is not a security boundary.** Rewritten code is checked against a
+  fixed vocabulary before it runs, and runs with no secrets, a time limit and a
+  memory limit, but real isolation needs containers.
 - **Memory sampling can miss very fast spikes.** The tool then reports "unknown
   line" and never guesses.
-- **Only `read_csv` / `read_table`**, CSV/TSV only (no VCF/BAM).
-- **Tested only on macOS**, Python 3.9.
-- **The demo scripts are simple on purpose.** They stand for the first step of a
-  real pipeline, not a complete analysis.
+- **CSV/TSV tables with pandas only** (plain or gzip/bz2/xz). No VCF/BAM.
+- **Tested on macOS and Linux; Windows is untested.**
+- **The demo scripts are simple on purpose**, and we did not study real users.
 
 ---
 
@@ -1310,6 +1395,7 @@ Each phase got its own branch and pull request (PR), and was merged into `main`:
 | #8 | `feature/demo-ui` | interactive mode, real ClinVar scripts, `--chunk-rows`, template-then-Claude, condition counting, clearer errors, optional walkthrough and web page, final docs |
 | #9 | `feature/script-only-flow` | data file read from the script itself, automatic chunk size, `limit`, `--apply` and `restore` |
 | #10 | `feature/local-llm` | local LLM rewriter (Ollama), first live LLM runs, retry of bad model answers, the `CHUNKSIZE` gap closed |
+| #11 | `feature/hardening` | risk review of 25 awkward cases: printed output compared, patch vocabulary, compressed and non-UTF-8 data, sample across the file, chunk halving, clearer failures, tests that measure their limit, automatic tests on Linux |
 
 **CONTRACT.md:** the July version split the work (A: Gates 1 and 2; B: Gate 3 and the LLM).
 On Oct 8 both authors agreed to these changes:
@@ -1364,9 +1450,11 @@ a separate process with a time limit, memory limit, temp folder and no API keys.
 **Q: Why return results as JSON instead of pickle?**
 Unpickling can run code, so unpickling untrusted output is a security hole. JSON is only data.
 
-**Q: Why is the sample split into chunks of 1,000?**
+**Q: Why is the sample split into small chunks, and why 997?**
 Otherwise a 5,000-row sample would fit in one chunk, and the merge logic would
-never be tested. That's the CHUNKSIZE contract.
+never be tested. 997 does not divide 5,000, so the last chunk is small. Some
+wrong rewrites, like averaging the chunk averages, are right when all chunks are
+equal and only fail when the last one is smaller, as on a real file.
 
 **Q: Passing on a sample doesn't prove the patch is safe on 50 GB. What do you do?**
 The full-scale check runs the whole patched script on the full file with the
@@ -1417,7 +1505,7 @@ genomics-style workload. The demo data is synthetic.
 
 **Q: What are the main limitations?**
 See section 15: small allowlist, simple template, sample-based checking,
-process-level sandbox, CSV only, the LLM tested live only with a small local model, macOS only.
+process-level sandbox, CSV only, the LLM tested live only with a small local model, Windows untested.
 
 **Q: How is this different from Scalene or memory_profiler?**
 They detect and report memory use. TracePatch also repairs the code and verifies the repair.
@@ -1535,10 +1623,11 @@ synthetic file). `--chunk-rows` overrides it.
 The full-scale check catches it: memory still goes over the cap, and the patch
 is not accepted. That happened on our first ClinVar run (section 14).
 
-**Q: Why 5,000 rows for the sample, and why the first rows?**
-It is small enough to run in under a second and big enough to split into 5
-chunks. Taking the first rows needs no loading. It is not a random sample, which
-is a limit: a problem that only appears in later rows would be missed by Gate 3.
+**Q: Why 5,000 rows for the sample, and where do they come from?**
+It is small enough to run in under a second and big enough to split into several
+chunks. The rows are taken from five places across the file, by jumping to those
+positions, so nothing is loaded. It is spread out but not random, and it is
+still a sample: that remains a limit.
 
 **Q: Why these tolerance values (1e-5 and 1e-8)?**
 They are numpy's defaults for `allclose`. Reordering additions changes a result
@@ -1603,7 +1692,7 @@ security sandbox; we state that as a limit.
 #### About testing and your work
 
 **Q: How did you test it?**
-66 automated tests: unit tests for each gate, integration tests that pass a
+90 automated tests: unit tests for each gate, integration tests that pass a
 rewrite through Gate 3, and end-to-end tests of the CLI. Plus manual runs on the
 real ClinVar file, checked against plain pandas.
 
@@ -1616,6 +1705,35 @@ Median and other operations with special merges; group-by and filter patterns;
 code outside functions; random sampling for Gate 3; choosing the chunk size from
 the memory cap; a live evaluation of the LLM rewriter; running automatically
 when a cluster job is killed.
+
+#### About robustness
+
+**Q: What happens if something unexpected goes wrong?**
+We tested that deliberately. We ran 25 awkward cases (compressed data, a
+function that prints, a class method, a limit that is too low, a wrong LLM
+answer and so on). Every one ends as `VERIFIED`, `REFUSED`, `FAILED` with a
+reason, or `NO_PROBLEM`. None crashes. The list is in RISK_REVIEW.md.
+
+**Q: What was the most serious thing that review found?**
+A false "verified": a function that prints its result instead of returning it
+was accepted without anything being compared. Gate 3 now compares printed output.
+
+**Q: What if the function prints instead of returning?**
+The sandbox captures what it prints and compares that: numbers with tolerance,
+words exactly.
+
+**Q: What if the data file is compressed, or not UTF-8?**
+Both work. The file is handled as bytes, and gzip, bz2 and xz are recognised
+from the first bytes of the file.
+
+**Q: Could the LLM's code delete files or run commands?**
+It is rejected before it runs. Rewritten code may only call a fixed list of
+operations; `open`, `eval`, `exec`, `__import__`, extra imports and anything
+unknown are refused unrun.
+
+**Q: Does it have no limitations, then?**
+No, and we do not claim that. We claim it never accepts a repair it could not
+verify, and never fails silently. Section 15 lists what remains.
 
 #### About real-world use
 
@@ -1677,7 +1795,7 @@ The verification idea is the part worth keeping.
 
 ```bash
 pip install -r requirements.txt          # install libraries
-python3 -m pytest                        # all 66 tests
+python3 -m pytest                        # all 90 tests
 
 # The full story on real data
 python3 demo/clinvar_summary.py                          # the script, run normally
@@ -1716,6 +1834,49 @@ python3 demo/app.py                      # web page at http://127.0.0.1:8050
 
 **Be accurate about this in the review.** We did not survey scientists. What
 follows is what public documentation shows.
+
+### How this looks in a real lab (an illustrative scenario)
+
+This is a scenario built from the documented practices below, **not** an
+account of a specific lab.
+
+1. **The lab.** A clinical genetics lab sequences a patient's DNA. A pipeline
+   turns the raw reads into a list of that patient's **variants** (places where
+   their DNA differs from the reference).
+2. **The lookup.** To decide which variants matter, each one is looked up in
+   reference tables. **ClinVar** is the main public one: it says what other labs
+   concluded about the same variant (pathogenic, benign, uncertain).
+3. **The local copy.** ClinVar is updated regularly, so the lab downloads the
+   new table and keeps a local copy. It is a large tab-separated file.
+4. **The script.** A bioinformatician writes a short Python script with pandas to
+   check and summarise each new copy: how many records, how many are
+   pathogenic, how much evidence there is. This is the kind of script in `demo/`.
+5. **The cluster.** The script is not run on a laptop. It is submitted as a
+   **job** to the institute's shared cluster through a scheduler (commonly
+   Slurm), asking for a fixed amount of memory, for example
+   `sbatch --mem=4G check_clinvar.sh`.
+6. **The failure.** The table has grown. `pd.read_csv` now needs more than the job
+   asked for. The scheduler kills the job. The log says only that it was killed
+   for memory (an "oom-kill event"). No Python error, no line number.
+7. **What happens today.** The person asks for more memory and submits again,
+   waits in the queue again, and repeats when the table grows again. Or they
+   rewrite the script by hand, or ask a chatbot to, and hope the result is
+   still correct.
+8. **Where TracePatch fits.** After step 6, the person runs TracePatch on the
+   script. It finds the line, checks that the calculation can be done in pieces,
+   rewrites the load, and proves the answer is unchanged and the memory fits.
+   If the calculation cannot be done in pieces, it says so instead of guessing.
+
+**How the demo maps to this**
+
+| In the real world | In the demo |
+|---|---|
+| the lab's local ClinVar table | `demo/data/clinvar.tsv` (300,000 real records) |
+| the bioinformatician's script | `demo/clinvar_summary.py` |
+| `sbatch --mem=...`: the scheduler's memory limit | `python3 -m tracepatch limit ...` (500 MB) |
+| the job is killed, the log says only "killed" | `Killed ... exit code 137` |
+| asking for more memory and resubmitting | (what TracePatch replaces) |
+| the repaired script, resubmitted with the same memory | `limit` again: finishes at about 180 MB |
 
 ### Where the problem really occurs
 

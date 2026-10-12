@@ -25,7 +25,8 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 NO_LIMIT_MB = 1_000_000
 
 
-def measure_cap(script: str, data: str, work_dir: str) -> int:
+def measure(script: str, data: str, work_dir: str):
+    """(baseline MB, eager MB): the script on a tiny file, and on the real one."""
     eager = trace(script, [data], mem_limit_mb=NO_LIMIT_MB).peak_mb
     tiny = os.path.join(work_dir, "tiny_" + os.path.basename(data))
     with open(data, "rb") as src, open(tiny, "wb") as dst:
@@ -37,7 +38,12 @@ def measure_cap(script: str, data: str, work_dir: str) -> int:
     if eager - baseline < 40:
         pytest.skip(f"loading the test data costs only {eager - baseline:.0f} MB here: "
                     "too little to simulate an out-of-memory kill")
-    return round(baseline + 0.55 * (eager - baseline))
+    return baseline, eager
+
+
+def measure_cap(script: str, data: str, work_dir: str, fraction: float = 0.55) -> int:
+    baseline, eager = measure(script, data, work_dir)
+    return round(baseline + fraction * (eager - baseline))
 
 
 @pytest.fixture(scope="session")
@@ -58,7 +64,14 @@ def big_csv(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def cap_mb(big_csv, tmp_path_factory):
+def memory_profile(big_csv, tmp_path_factory):
+    """(baseline MB, eager MB) for loading big_csv on this machine."""
+    return measure(os.path.join(FIXTURES, "sum_pipeline.py"), big_csv,
+                   str(tmp_path_factory.mktemp("calibrate")))
+
+
+@pytest.fixture(scope="session")
+def cap_mb(memory_profile):
     """A memory limit that loading big_csv all at once is certain to exceed."""
-    return measure_cap(os.path.join(FIXTURES, "sum_pipeline.py"), big_csv,
-                       str(tmp_path_factory.mktemp("calibrate")))
+    baseline, eager = memory_profile
+    return round(baseline + 0.55 * (eager - baseline))
