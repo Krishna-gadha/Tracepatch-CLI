@@ -100,3 +100,10 @@ def test_make_sample_and_extract_imports(tmp_path, sample):
     assert len(open(out).read().splitlines()) == 11  # header + 10 rows
     src = "import sys\nimport pandas as pd\n\ndef f():\n    import os\n"
     assert extract_imports(src) == "import sys\nimport pandas as pd\n"
+
+
+def test_patch_that_sets_chunksize_itself_is_rejected(sample):
+    # Seen from a real local model: it would hide the merge logic from the oracle.
+    patch = GOOD_PATCH.replace("    total, rows = 0, 0", "    CHUNKSIZE = 100000\n    total, rows = 0, 0")
+    v = verify_patch(ORIGINAL, patch, "total_depth", sample, PREAMBLE)
+    assert not v["verified"] and "assigns CHUNKSIZE" in v["reason"]

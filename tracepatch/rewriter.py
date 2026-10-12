@@ -7,6 +7,9 @@ One small interface, two implementations, so providers are swappable:
   This is the demo default and what the tests use.
 - LLMRewriter: asks Claude via the Anthropic API. Key comes from the
   ANTHROPIC_API_KEY environment variable, never from code.
+- LocalLLMRewriter: asks a model running on this machine through Ollama
+  (free, no key, no internet). Small local models make more mistakes; that is
+  fine, because Gate 3 rejects wrong rewrites and the reason is sent back.
 
 Neither is trusted. Every rewrite goes through Gate 3 (sandbox + oracle)
 before it is accepted. Both must follow the CHUNKSIZE contract:
@@ -15,19 +18,28 @@ read_csv(..., chunksize=CHUNKSIZE).
 
 import ast
 import copy
+import json
 import os
 import re
+import urllib.error
+import urllib.request
 from typing import List, Optional, Tuple
 
 from tracepatch.gate2_ast import LOADER_METHODS
 
 
 class RewriteError(Exception):
-    """The rewriter could not produce a patch. Message says why."""
+    """The rewriter could not produce a patch. Message says why.
+    retryable=True means "the model gave a bad answer; asking again may help"."""
+
+    def __init__(self, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class Rewriter:
     name = "base"
+    label = "rewriter"  # how it is named in the log
 
     def rewrite(self, source_segment: str, func_name: str,
                 feedback: Optional[str] = None) -> str:
@@ -140,6 +152,7 @@ def _indent(code: str, level: int) -> str:
 
 class TemplateRewriter(Rewriter):
     name = "template"
+    label = "template rewriter"
 
     def rewrite(self, source_segment, func_name, feedback=None):
         # feedback is ignored: a deterministic template would just repeat itself.
@@ -213,7 +226,45 @@ original uses (e.g. pd); do not add imports.
 - If the computation cannot be done correctly chunk by chunk, return the \
 single line: CANNOT_CHUNK
 
-Output only the Python source of the function, nothing else."""
+Example. Original:
+
+def summary(path):
+    df = pd.read_csv(path, sep="\\t")
+    big = df[df["size"] > 10]
+    return len(df), big["count"].sum()
+
+Rewritten:
+
+def summary(path):
+    rows = 0
+    total = 0
+    for chunk in pd.read_csv(path, sep="\\t", chunksize=CHUNKSIZE):
+        rows += len(chunk)
+        big = chunk[chunk["size"] > 10]
+        total += big["count"].sum()
+    return rows, total
+
+Never assign to CHUNKSIZE. Output only the Python source of the function, nothing else."""
+
+
+def build_prompt(source_segment: str, func_name: str, feedback: Optional[str]) -> str:
+    prompt = f"Rewrite the function `{func_name}`:\n\n{source_segment}"
+    if feedback:
+        prompt += (f"\n\nYour previous rewrite was rejected by the verifier: {feedback}\n"
+                   "Fix that. Output only the corrected function.")
+    return prompt
+
+
+def clean_answer(text: str, who: str) -> str:
+    """Turn a model's answer into function source, or raise RewriteError."""
+    code = strip_fences(text)
+    if code.strip() == "CANNOT_CHUNK":
+        raise RewriteError(f"{who} says this function cannot be computed chunk by chunk")
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        raise RewriteError(f"{who} returned invalid Python: {e}", retryable=True)
+    return code
 
 
 def strip_fences(text: str) -> str:
@@ -226,6 +277,7 @@ class LLMRewriter(Rewriter):
     name = "llm"
 
     def __init__(self, model: str = LLM_MODEL, effort: str = "medium", client=None):
+        self.label = f"Claude ({model})"
         self.model = model
         self.effort = effort
         self._client = client  # tests pass a fake client; real use builds one lazily
@@ -243,9 +295,7 @@ class LLMRewriter(Rewriter):
         return self._client
 
     def rewrite(self, source_segment, func_name, feedback=None):
-        prompt = f"Rewrite the function `{func_name}`:\n\n{source_segment}"
-        if feedback:
-            prompt += f"\n\nYour previous rewrite was rejected by the verifier: {feedback}\nFix that."
+        prompt = build_prompt(source_segment, func_name, feedback)
         client = self._get_client()
         try:
             import anthropic
@@ -272,19 +322,61 @@ class LLMRewriter(Rewriter):
         if response.stop_reason == "max_tokens":
             raise RewriteError("Claude's answer was cut off (max_tokens)")
         text = "".join(b.text for b in response.content if b.type == "text")
-        if "CANNOT_CHUNK" in text:
-            raise RewriteError("Claude says this function cannot be computed chunk by chunk")
-        code = strip_fences(text)
+        return clean_answer(text, "Claude")
+
+
+# ------------------------------------------------------------- local LLM
+
+OLLAMA_URL = "http://localhost:11434"
+LOCAL_MODEL = "llama3.2"  # override with the TRACEPATCH_LOCAL_MODEL environment variable
+
+
+def local_llm_available(url: str = OLLAMA_URL) -> bool:
+    """Is an Ollama server answering on this machine?"""
+    try:
+        urllib.request.urlopen(url + "/api/tags", timeout=1).read()
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+class LocalLLMRewriter(Rewriter):
+    """A model running on this machine through Ollama (https://ollama.com).
+    Free and offline. Its output is trusted no more than Claude's."""
+    name = "local"
+
+    def __init__(self, model: Optional[str] = None, url: str = OLLAMA_URL):
+        self.model = model or os.environ.get("TRACEPATCH_LOCAL_MODEL", LOCAL_MODEL)
+        self.url = url
+        self.label = f"local LLM ({self.model})"
+
+    def rewrite(self, source_segment, func_name, feedback=None):
+        body = {
+            "model": self.model,
+            "stream": False,
+            "options": {"temperature": 0},  # same question -> same answer
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_prompt(source_segment, func_name, feedback)},
+            ],
+        }
+        request = urllib.request.Request(self.url + "/api/chat", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
         try:
-            ast.parse(code)
-        except SyntaxError as e:
-            raise RewriteError(f"Claude returned invalid Python: {e}")
-        return code
+            with urllib.request.urlopen(request, timeout=300) as response:
+                answer = json.load(response)
+        except (urllib.error.URLError, OSError) as e:
+            raise RewriteError(f"could not reach the local model at {self.url} ({e}); "
+                               "is Ollama running?")
+        if "error" in answer:
+            raise RewriteError(f"local model error: {answer['error']}")
+        return clean_answer(answer.get("message", {}).get("content", ""), self.label)
 
 
 class TemplateThenLLMRewriter(Rewriter):
     """Try the free, deterministic template first; only if it cannot handle
-    the function, ask Claude. Either result still has to pass Gate 3."""
+    the function, ask the LLM (Claude or a local model). Either result still
+    has to pass Gate 3."""
     name = "template+llm"
 
     def __init__(self, llm: Optional[Rewriter] = None):
@@ -296,21 +388,28 @@ class TemplateThenLLMRewriter(Rewriter):
         if feedback is None:  # first attempt: template
             try:
                 code = self.template.rewrite(source_segment, func_name)
-                self.used = "template"
+                self.used, self.label = "template", "template rewriter"
                 return code
             except RewriteError:
                 pass  # template can't do it: fall through to the LLM
-        code = self.llm.rewrite(source_segment, func_name, feedback)
-        self.used = "llm"
-        return code
+        self.used, self.label = self.llm.name, self.llm.label
+        return self.llm.rewrite(source_segment, func_name, feedback)
 
 
 def get_rewriter(name: str) -> Rewriter:
-    """'template', 'llm', or 'auto' (template first, then Claude if a key is set)."""
+    """'template', 'llm' (Claude), 'local' (Ollama), or 'auto'.
+    auto = template first, then an LLM if one is available: Claude when
+    ANTHROPIC_API_KEY is set, otherwise a local Ollama model if it is running."""
     if name == "template":
         return TemplateRewriter()
     if name == "llm":
         return LLMRewriter()
+    if name == "local":
+        return LocalLLMRewriter()
     if name == "auto":
-        return TemplateThenLLMRewriter() if os.environ.get("ANTHROPIC_API_KEY") else TemplateRewriter()
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return TemplateThenLLMRewriter(LLMRewriter())
+        if local_llm_available():
+            return TemplateThenLLMRewriter(LocalLLMRewriter())
+        return TemplateRewriter()
     raise ValueError(f"unknown rewriter {name!r}")

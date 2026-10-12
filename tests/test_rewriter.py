@@ -108,10 +108,15 @@ def test_llm_without_key_fails_clearly(monkeypatch):
 
 
 def test_auto_picks_template_without_key(monkeypatch):
+    import tracepatch.rewriter as rw
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert get_rewriter("auto").name == "template"
+    monkeypatch.setattr(rw, "local_llm_available", lambda: False)
+    assert get_rewriter("auto").name == "template"             # no LLM at all
+    monkeypatch.setattr(rw, "local_llm_available", lambda: True)
+    assert get_rewriter("auto").llm.name == "local"            # Ollama running
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-test-value")
-    assert get_rewriter("auto").name == "template+llm"
+    auto = get_rewriter("auto")
+    assert auto.name == "template+llm" and auto.llm.name == "llm"  # a key wins
 
 
 def test_template_first_then_llm_only_when_needed():
@@ -145,3 +150,21 @@ def test_template_refuses_filter_then_aggregate():
     src = "def f(p):\n    df = pd.read_csv(p)\n    return df[df['a'] == 1]['b'].sum()\n"
     with pytest.raises(RewriteError, match="template handles"):
         TemplateRewriter().rewrite(src, "f")
+
+
+def test_bad_model_answer_is_retryable_but_cannot_chunk_is_not():
+    from tracepatch.rewriter import clean_answer
+    with pytest.raises(RewriteError) as bad:
+        clean_answer("Sure! Here is the code: def f(:", "model")
+    assert bad.value.retryable
+    with pytest.raises(RewriteError) as cannot:
+        clean_answer("CANNOT_CHUNK", "model")
+    assert not cannot.value.retryable
+    # The word inside real code is not a refusal.
+    assert "def f" in clean_answer('def f():\n    return "CANNOT_CHUNK"\n', "model")
+
+
+def test_local_rewriter_unreachable_server_fails_clearly():
+    from tracepatch.rewriter import LocalLLMRewriter
+    with pytest.raises(RewriteError, match="is Ollama running"):
+        LocalLLMRewriter(url="http://127.0.0.1:9").rewrite("def f(): pass", "f")

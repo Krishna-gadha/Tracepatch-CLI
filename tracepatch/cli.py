@@ -51,8 +51,9 @@ def main(argv=None) -> int:
                         "not needed when the path is written inside the script")
     r.add_argument("--mem-limit-mb", type=float, default=DEFAULT_CAP_MB,
                    help=f"memory cap enforced by the watchdog (default {DEFAULT_CAP_MB})")
-    r.add_argument("--rewriter", choices=["template", "llm", "auto"], default="template",
-                   help="template = no network (default); llm = Claude, needs ANTHROPIC_API_KEY")
+    r.add_argument("--rewriter", choices=["template", "llm", "local", "auto"], default="template",
+                   help="template = offline rules (default); llm = Claude (needs ANTHROPIC_API_KEY); "
+                        "local = a model in Ollama on this machine; auto = template first, then an LLM")
     r.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS,
                    choices=range(1, MAX_ATTEMPTS + 1), help=f"at most {MAX_ATTEMPTS}")
     r.add_argument("--sample-rows", type=int, default=5000,
