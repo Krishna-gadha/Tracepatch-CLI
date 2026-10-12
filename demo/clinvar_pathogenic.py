@@ -4,8 +4,8 @@ ClinSigSimple is 1 when at least one lab classified the variant as
 pathogenic or likely pathogenic. Note: ClinVar lists each variant once per
 genome assembly (GRCh37 and GRCh38), so these are records, not unique variants.
 
-This needs a comparison before the sum, which the template rewriter does not
-handle; the LLM rewriter does (needs ANTHROPIC_API_KEY).
+Counting rows that match a condition is chunk-safe: count the matches in
+each chunk, then add the counts.
 """
 
 import sys

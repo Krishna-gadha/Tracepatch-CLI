@@ -2,7 +2,8 @@
 
 One small interface, two implementations, so providers are swappable:
 - TemplateRewriter: deterministic, no network. Handles only simple
-  aggregations: df[col].sum() / .count() / .min() / .max() and len(df).
+  aggregations: df[col].sum() / .count() / .min() / .max(), len(df), and
+  counting rows that match a simple condition: (df[col] == value).sum().
   This is the demo default and what the tests use.
 - LLMRewriter: asks Claude via the Anthropic API. Key comes from the
   ANTHROPIC_API_KEY environment variable, never from code.
@@ -45,16 +46,37 @@ COMBINE = {
     "max": "max",    # global max = max of chunk maxes
 }
 CHUNK_VAR = "_tp_chunk"
+SUPPORTED = "template handles {df}[col].sum/count/min/max(), ({df}[col] == value).sum() and len({df})"
+
+
+def _is_column(node, df: str) -> bool:
+    # Matches df["col"]: one column of the loaded table, named by a string.
+    return (isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name) and node.value.id == df
+            and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str))
 
 
 def _is_column_agg(node: ast.Call, df: str) -> bool:
     # Matches df["col"].sum() (and count/min/max) with no arguments.
     f = node.func
     return (isinstance(f, ast.Attribute) and f.attr in COMBINE
+            and not node.args and not node.keywords and _is_column(f.value, df))
+
+
+COMPARE_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+
+
+def _is_condition_count(node: ast.Call, df: str) -> bool:
+    # Matches (df["col"] == value).sum(): how many rows satisfy one simple
+    # condition. Chunk-safe because each row is tested on its own, so the
+    # total is the sum of the per-chunk counts.
+    f = node.func
+    return (isinstance(f, ast.Attribute) and f.attr == "sum"
             and not node.args and not node.keywords
-            and isinstance(f.value, ast.Subscript)
-            and isinstance(f.value.value, ast.Name) and f.value.value.id == df
-            and isinstance(f.value.slice, ast.Constant) and isinstance(f.value.slice.value, str))
+            and isinstance(f.value, ast.Compare) and len(f.value.ops) == 1
+            and isinstance(f.value.ops[0], COMPARE_OPS)
+            and _is_column(f.value.left, df)
+            and isinstance(f.value.comparators[0], ast.Constant))
 
 
 def _is_len(node: ast.Call, df: str) -> bool:
@@ -87,6 +109,8 @@ class _AggCollector(ast.NodeTransformer):
             combine = COMBINE[node.func.attr]
         elif _is_len(node, self.df):
             combine = "sum"  # rows = sum of rows per chunk
+        elif _is_condition_count(node, self.df):
+            combine = "sum"  # matching rows = sum of matches per chunk
         else:
             return self.generic_visit(node)
         per_chunk = ast.unparse(_Rename(self.df, CHUNK_VAR).visit(copy.deepcopy(node)))
@@ -136,14 +160,13 @@ class TemplateRewriter(Rewriter):
         collector = _AggCollector(df)
         after = [collector.visit(copy.deepcopy(s)) for s in func.body[idx + 1:]]
         if not collector.aggs:
-            raise RewriteError(f"no supported aggregation on `{df}` (template handles "
-                               f"{df}[col].sum/count/min/max() and len({df}))")
+            raise RewriteError(f"no supported aggregation on `{df}` ({SUPPORTED.format(df=df)})")
         # Any remaining use of df is something the template does not understand.
         for stmt in after:
             for node in ast.walk(stmt):
                 if isinstance(node, ast.Name) and node.id == df:
-                    raise RewriteError(f"`{df}` is used on line {node.lineno} of {func_name}() in a way the template "
-                                       f"cannot rewrite (only {df}[col].sum/count/min/max() and len({df}))")
+                    raise RewriteError(f"`{df}` is used on line {node.lineno} of {func_name}() in a way "
+                                       f"the template cannot rewrite ({SUPPORTED.format(df=df)})")
 
         # Rebuild read_csv(...) with chunksize=CHUNKSIZE added.
         loader = copy.deepcopy(load.value)

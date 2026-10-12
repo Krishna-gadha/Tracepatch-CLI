@@ -124,8 +124,11 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
         if t.exit_code == 0:
             return finish("no_problem", f"peak {t.peak_mb:.0f} MB stayed under the "
                                         f"{mem_limit_mb:.0f} MB cap; nothing to fix")
-        return finish("failed", f"the script crashed for a non-memory reason "
-                                f"(exit {t.exit_code}):\n{t.stderr.strip()[-800:]}")
+        # Show the last line of the traceback (the actual error), not all of it.
+        error = (t.stderr.strip().splitlines() or ["no error output"])[-1]
+        return finish("failed", f"the script itself failed before any memory problem "
+                                f"(exit {t.exit_code}): {error}\n"
+                                f"  (is this the right dataset for this script?)")
     if t.peak_line is None:
         return finish("failed", "memory cap hit, but no sample landed inside the script, "
                                 "so the fault line is unknown")

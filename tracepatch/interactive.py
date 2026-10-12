@@ -95,6 +95,14 @@ def show_diff(path: str):
 
 
 def main() -> int:
+    try:
+        return _main()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        return 130
+
+
+def _main() -> int:
     print(_c("1;34", "\nTracePatch") + " — find an out-of-memory crash, repair it, verify the repair\n")
 
     print(_c("1", "1. Upload your dataset"))
@@ -112,11 +120,19 @@ def main() -> int:
         print(_c("33", f"   ! {os.path.basename(script)}: no read_csv inside a function found\n"))
 
     print(_c("1", "3. Memory limit"))
-    try:
-        raw = input(f"   Memory available to the script in MB [{DEFAULT_CAP_MB}]: ").strip()
-    except EOFError:
-        raw = ""
-    cap = float(raw) if raw else DEFAULT_CAP_MB
+    cap = None
+    while cap is None:
+        try:
+            raw = input(f"   Memory available to the script in MB [{DEFAULT_CAP_MB}]: ").strip()
+        except EOFError:
+            raw = ""
+        try:
+            cap = float(raw) if raw else float(DEFAULT_CAP_MB)
+            if cap < 50:
+                raise ValueError
+        except ValueError:
+            print(_c("31", "   ✗ Please type a number of at least 50, or just press Enter"))
+            cap = None
     chunk_rows = auto_chunk_rows(size, rows)
     print()
 
