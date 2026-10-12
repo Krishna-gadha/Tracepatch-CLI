@@ -85,7 +85,8 @@ python3 -m tracepatch restore demo/clinvar_summary.py      # put the original ba
 | `demo/clinvar_summary.py` | records, lab submissions, average and max per record | **verified**: 678 MB → about 180 MB |
 | `demo/clinvar_pathogenic.py` | how many records are pathogenic | **verified**: 115,014 of 300,000 |
 | `demo/clinvar_median.py` | median submissions | **refused** by Gate 2 |
-| `demo/clinvar_needs_llm.py` | filter rows, then sum | template can't; needs the LLM rewriter |
+| `demo/clinvar_needs_llm.py` | filter rows, then sum | with `--rewriter auto`: the local LLM writes the repair, **verified** |
+| `demo/clinvar_llm_rejected.py` | max and min of filtered rows | with `--rewriter auto`: the local LLM's repair is wrong, **rejected** by Gate 3 |
 
 ### Synthetic data (no download)
 
@@ -105,8 +106,9 @@ Patched scripts and diffs go to `tracepatch_out/`. Exit codes: `0` verified
 
 Options of `run`: `--data FILE`, `--mem-limit-mb N` (default 500), `--apply`,
 `--chunk-rows N` (default: chosen from how wide the rows are), `--rewriter
-template|llm|auto` (`auto` = template first, then Claude if `ANTHROPIC_API_KEY`
-is set), `--max-attempts 1..3`, `--sample-rows N`, `--out-dir DIR`, `--timeout SECONDS`.
+template|llm|local|auto` (`llm` = Claude, needs `ANTHROPIC_API_KEY`; `local` = a
+model in [Ollama](https://ollama.com) on this machine, free; `auto` = template
+first, then whichever LLM is available), `--max-attempts 1..3`, `--sample-rows N`, `--out-dir DIR`, `--timeout SECONDS`.
 
 The `read_csv` must be inside a function.
 
@@ -161,8 +163,9 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - [x] Data file read from the script itself (path in the call, a top-level constant, or an argument)
 - [x] Demo on real ClinVar data: two scripts verified, median refused
 - [x] Demo on synthetic data: `safe_pipeline.py` verified, `unsafe_pipeline.py` refused
-- [x] Test suite (`python3 -m pytest`): 63 tests passing
-- [ ] `LLMRewriter` against the real API: implemented (with a template-first fallback), but only tested with a fake client. **No live Claude call has been made yet.**
+- [x] Test suite (`python3 -m pytest`): 66 tests passing
+- [x] LLM rewriting, run live with a local model (`llama3.2` through Ollama): one script repaired and verified, one wrong repair rejected by Gate 3
+- [ ] `LLMRewriter` (Claude) against the real API: implemented, but only tested with a fake client. **No live Claude call has been made** (needs a paid key).
 - [ ] Code outside a function (top-level `read_csv`): refused, not repaired
 - [ ] Tested on Linux / Windows: only run on macOS so far (the code avoids Unix-only modules)
 - [ ] Real genomics formats (VCF/BAM): not supported; CSV/TSV only
@@ -172,6 +175,9 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - **The allowlist is small** (8 methods + 6 builtins), and calls are matched by
   name, not by type. Non-call operations such as `df.iloc[-1]` are not judged by
   Gate 2; Gate 3 is the backstop.
+- **LLM results are two examples, not an evaluation.** A small local model
+  repaired one script and failed another; we have not measured success rates, and
+  the Claude path has not been run live.
 - **The template rewriter only handles simple aggregations**: `df[col].sum()`,
   `.count()`, `.min()`, `.max()`, `len(df)` and `(df[col] == value).sum()`. It
   refuses everything else, such as filtering rows and then aggregating.
@@ -201,7 +207,8 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 tracepatch/   cli.py  interactive.py  orchestrator.py  dataref.py  gate1_tracer.py
               _trace_child.py  gate2_ast.py  rewriter.py  gate3_sandbox.py
               _sandbox_child.py  gate3_oracle.py  watchdog.py
-demo/         clinvar_summary.py  clinvar_pathogenic.py  clinvar_median.py  clinvar_needs_llm.py
+demo/         clinvar_summary.py  clinvar_pathogenic.py  clinvar_median.py
+              clinvar_needs_llm.py  clinvar_llm_rejected.py
               make_data.py  safe_pipeline.py  unsafe_pipeline.py
               terminal_demo.sh  app.py  web/        (optional walkthrough and web page)
 tests/        test_gate2.py  test_tracer.py  test_oracle.py  test_sandbox.py  test_rewriter.py

@@ -25,14 +25,19 @@ applied the repair; undo it with `python3 -m tracepatch restore demo/clinvar_sum
 ```bash
 python3 -m pytest
 ```
-Must end with `63 passed`.
+Must end with `66 passed`.
+
+```bash
+ollama list
+```
+Must list `llama3.2` (if it says it cannot connect, open the Ollama app).
 
 Then do **one full practice run** of the demo below, and `restore` afterwards. Also:
 - make the terminal font large, and run `clear` before you start;
 - close heavy apps, so memory readings are steady;
 - keep this file open on the side.
 
-## The demo (about 7 minutes)
+## The demo (about 9 minutes with the LLM steps)
 
 ### 1. Say what it is (20 seconds)
 
@@ -128,7 +133,7 @@ python3 -m tracepatch run demo/clinvar_median.py
 python3 -m pytest
 ```
 
-> "63 automated tests cover every gate, including a patch with a deliberate bug that
+> "66 automated tests cover every gate, including a patch with a deliberate bug that
 > Gate 3 must catch, and a check that the retry loop stops after three attempts."
 
 ### 8. Optional: a more meaningful question
@@ -140,45 +145,51 @@ python3 -m tracepatch run demo/clinvar_pathogenic.py
 > "This counts how many records are pathogenic, meaning disease-causing: 115,014 of
 > 300,000. Counting rows that match a condition is also safe to do in pieces."
 
-## The LLM
+## The LLM (free, on this laptop)
 
-### Setting it up (do this before the review, not during it)
+TracePatch uses a language model that runs **on the laptop** through Ollama:
+`llama3.2`. No account, no key, no internet, no cost. It is used only when the
+offline template cannot handle a function.
 
-1. Go to **console.anthropic.com**, sign in, and add a small amount of credit under Billing.
-2. Under **API keys**, create a key and copy it.
-3. In the **same terminal** you will run TracePatch from, type this with your key
-   (it lasts until you close that terminal; never put the key in a file or in git):
-   ```bash
-   export ANTHROPIC_API_KEY=paste-your-key-here
-   ```
-4. Run the script the offline template cannot repair:
-   ```bash
-   python3 -m tracepatch run demo/clinvar_needs_llm.py --rewriter auto
-   ```
-5. Look for `[Rewrite] llm rewriter produced ...`, then Gate 3 and Verify.
-
-**This has never been run live.** Do it tonight or early tomorrow, and keep the
-output. Three outcomes are possible, and all three are fine to show:
-- **Verified**: Claude's rewrite passed every gate.
-- **Rejected, then verified**: a gate rejected the first rewrite, the reason was
-  sent back, and the next attempt passed. This is the best demonstration of why
-  the gates exist.
-- **Failed after 3 attempts**: the tool refused to accept unverified code.
-
-If it prints a "Claude API error", copy the message; it usually means the key
-or the credit is not set up.
-
-### If you have no key
+**Before the review**, check that Ollama is running (it is the llama icon in the
+menu bar; if it is not there, open the Ollama app):
 
 ```bash
-python3 -m tracepatch run demo/clinvar_needs_llm.py
+ollama list
+```
+It must list `llama3.2`.
+
+### 9. An LLM-written repair that is verified
+
+```bash
+python3 -m tracepatch run demo/clinvar_needs_llm.py --rewriter auto
 ```
 
-> "This script filters rows and then sums. Gate 2 says it is safe, but our offline
-> template doesn't know this pattern, so it stops and says so. This is where the LLM
-> rewriter plugs in: Claude writes the repair and the same gates verify it. That part
-> is implemented and tested with a mock, but we have not run it live, because it
-> needs a paid API key."
+> "This script filters the pathogenic records and then sums their lab submissions.
+> Our offline template does not know this pattern, so TracePatch asks a language
+> model. Look at the Rewrite line: `local LLM (llama3.2)`. The model wrote the
+> repair, but we do not trust it: Gate 3 compared it with the original on a sample,
+> and the full-scale check measured its memory. Only then was it accepted."
+
+To show the code the model wrote: `cat tracepatch_out/clinvar_needs_llm.diff`
+
+### 10. An LLM-written repair that is rejected
+
+```bash
+python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
+```
+
+> "Here the model's rewrite is wrong: on the sample the original says 34 and the
+> model's code says 5000. Gate 3 rejects it, the reason is sent back to the model,
+> and it is asked again, three times at most. It never gets it right, so TracePatch
+> fails loudly and changes nothing. This is the point of the project: the model can
+> be wrong, and wrong code is never accepted."
+
+### What to say about Claude
+
+> "The same interface has a rewriter for Claude, a much stronger model. It is
+> implemented and tested with a mock, but we have not run it live, because it needs
+> a paid API key. The gates are the same whichever model writes the code."
 
 ## Numbers to remember
 
@@ -194,7 +205,8 @@ python3 -m tracepatch run demo/clinvar_needs_llm.py
 | Number tolerance | relative 1e-5, absolute 1e-8 |
 | Retry cap | 3 attempts |
 | Allowlist | 8 methods + 6 builtins |
-| Tests | 63 |
+| Tests | 66 |
+| LLM | `llama3.2` (3 billion parameters, 2 GB), local through Ollama |
 | Exit codes | 0 verified, 2 refused, 1 failed, 137 killed by `limit` |
 
 ## If something goes wrong
@@ -205,6 +217,7 @@ python3 -m tracepatch run demo/clinvar_needs_llm.py
 | "File not found" or "data file not found" | You must be in the project folder: `pwd` should end in ` Tracepatch` |
 | `NO_PROBLEM: ... stayed under the cap` | The script is already repaired. Run `python3 -m tracepatch restore demo/clinvar_summary.py` |
 | `limit` finishes instead of being killed | Same cause: `restore` the script |
+| The Rewrite line says `template rewriter could not rewrite` in steps 9–10 | Ollama is not running: open the Ollama app, check `ollama list`, and run again |
 | Interactive mode misbehaves | Use one command: `python3 -m tracepatch run demo/clinvar_summary.py` |
 | `clinvar.tsv` is missing or broken | Use the synthetic data: `python3 demo/make_data.py`, then `python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv` and the same with `demo/unsafe_pipeline.py` |
 | A run fails unexpectedly | Run it once more (memory readings vary a little), then use the synthetic data |
@@ -221,7 +234,7 @@ python3 -m tracepatch run demo/clinvar_needs_llm.py
 8. **Why a tolerance for numbers?** Chunking changes the order of additions, and `(0.1+0.2)+0.3` is not exactly `0.1+(0.2+0.3)`.
 9. **Does passing the sample prove it works on the full file?** No. That is why the full-scale check exists. On our first ClinVar run it caught a patch that still used over 600 MB.
 10. **Your laptop has 24 GB. Is the crash real?** The limit is simulated by our watchdog, the way a cluster scheduler enforces a job's limit. Without it this script needs 678 MB; bigger files need far more.
-11. **Where is the AI?** The LLM rewriter, and making LLM-written code trustworthy by verifying it. The gates themselves are program analysis and testing.
+11. **Where is the AI?** A language model writes the repairs the template can't (we run `llama3.2` locally), and the project's point is making LLM-written code trustworthy by verifying it. The gates themselves are program analysis and testing.
 12. **What are the limits?** Small allowlist, simple template patterns, sample-based checking, loading must be inside a function, CSV/TSV only, macOS only, process-level sandbox.
 
 More questions with answers: LEARNING_GUIDE.md, section 18. Real-world context

@@ -279,7 +279,7 @@ tracepatch/             the tool itself (a Python package)
   gate1_tracer.py       Gate 1, parent side: starts the script, reads samples
   _trace_child.py       Gate 1, child side: runs the script + samples line/RSS
   gate2_ast.py          Gate 2: allowlist AST check
-  rewriter.py           Rewriter interface, TemplateRewriter, LLMRewriter, template-then-LLM
+  rewriter.py           Rewriter interface; template, Claude and local-LLM rewriters
   gate3_sandbox.py      Gate 3, parent side: runs functions in a sandbox
   _sandbox_child.py     Gate 3, child side: executes one function, returns JSON
   gate3_oracle.py       Gate 3: compares two results with tolerance
@@ -289,7 +289,8 @@ demo/
   clinvar_summary.py    REAL data: record count + lab submissions      → FIXED
   clinvar_pathogenic.py REAL data: how many records are pathogenic     → FIXED
   clinvar_median.py     REAL data: median submissions                  → REFUSED
-  clinvar_needs_llm.py  REAL data: filter rows, then sum               → template can't; needs the LLM
+  clinvar_needs_llm.py  REAL data: filter rows, then sum               → repaired by the LLM, VERIFIED
+  clinvar_llm_rejected.py REAL data: max/min of filtered rows          → LLM answer wrong, REJECTED
   data/clinvar.tsv      the real ClinVar file (downloaded, NOT in git)
   make_data.py          generates a synthetic variant-table CSV (4M rows ≈ 116 MB)
   safe_pipeline.py      synthetic data: sum/count/min/max/len          → FIXED
@@ -297,7 +298,7 @@ demo/
   terminal_demo.sh      optional narrated step-by-step walkthrough
   app.py, web/          optional local web page over the same pipeline
 
-tests/                  63 automated tests (see section 13)
+tests/                  66 automated tests (see section 13)
   fixtures/             small scripts the tests run
 
 docs/LEARNING_GUIDE.md  this file
@@ -560,32 +561,91 @@ hold only one small number per chunk.
 - **Fallback:** it turns on the API's refusal fallback, so if a safety check
   declines, the request is retried on another model.
 - **Status:** tested only with a **fake client** (no network). **No live call
-  has been made yet.**
+  to Claude has been made**, because it needs a paid API key.
 
-**Neither rewriter is trusted.** Every output must pass Gate 3 and the full-scale check.
+### LocalLLMRewriter (a free model on this laptop)
 
-### Template first, then Claude (`TemplateThenLLMRewriter`)
+- **What it is:** a language model that runs **on the laptop itself** through
+  [Ollama](https://ollama.com), a program that serves models locally. No
+  account, no key, no internet, no cost.
+- **Model:** `llama3.2` by default (a small 3-billion-parameter model, 2 GB).
+  Set the `TRACEPATCH_LOCAL_MODEL` environment variable to use another one.
+- **How it is called:** one HTTP request to `http://localhost:11434/api/chat`
+  with the same system prompt and the same question as Claude gets, using
+  Python's built-in `urllib` (no extra library). `temperature` is 0, so the
+  same question gives the same answer.
+- **The prompt contains one worked example** of a chunked rewrite. Small models
+  follow an example much better than a list of rules.
+- **Shared code:** `build_prompt()` writes the question (and adds the rejection
+  reason on a retry); `clean_answer()` strips fences, recognises `CANNOT_CHUNK`
+  and checks the answer is valid Python.
+- **Status: run live.** These are real results on the ClinVar file:
+
+  | Script | What the local model did | Outcome |
+  |---|---|---|
+  | `clinvar_needs_llm.py` (filter rows, then sum) | wrote a correct chunked loop | **VERIFIED**: 563,725 submissions, identical to plain pandas; 193 MB |
+  | `clinvar_llm_rejected.py` (max and min of filtered rows) | wrote a wrong loop | **REJECTED** by Gate 3 three times ("expected 34.0, got 5000.0"), then `FAILED`; nothing accepted |
+
+A small local model is weaker than Claude, and that is fine: the design never
+depended on the model being right.
+
+**No rewriter is trusted.** Every output must pass Gate 3 and the full-scale check.
+
+### Template first, then an LLM (`TemplateThenLLMRewriter`)
 
 `--rewriter auto` and the interactive mode use this small class:
 
 1. On the first attempt it tries the **template** (free, instant, the same
    answer every time).
-2. Only if the template raises `RewriteError` does it call **Claude**.
-3. On a retry (when `feedback` is given) it goes straight to Claude, because
+2. Only if the template raises `RewriteError` does it ask the **LLM**: Claude
+   if `ANTHROPIC_API_KEY` is set, otherwise the local model if Ollama is
+   running. If neither is available, `auto` is just the template.
+3. On a retry (when `feedback` is given) it goes straight to the LLM, because
    the template would only repeat itself.
 
-It records which one produced the patch in `.used`, and the log line says so:
-`[Rewrite] template rewriter produced ...` or `[Rewrite] llm rewriter produced ...`.
+The log line names who wrote the patch: `[Rewrite] template rewriter produced ...`,
+`[Rewrite] local LLM (llama3.2) produced ...` or `[Rewrite] Claude (...) produced ...`.
 
-Example of a function the template refuses: `clinvar_needs_llm.py` filters rows
-and *then* sums another column (`df[df["ClinSigSimple"] == 1]["NumberSubmitters"].sum()`).
-Without a key the run stops with:
+**A bad answer is sent back, not accepted.** `RewriteError` has a `retryable`
+flag. If the model returns something that is not valid Python, the orchestrator
+prints `[Rewrite] REJECTED: ...`, passes the reason back, and asks again (within
+the 3 attempts).
+
+Real run, `python3 -m tracepatch run demo/clinvar_needs_llm.py --rewriter auto`:
 
 ```
-FAILED: template rewriter could not rewrite pathogenic_evidence(): `df` is used on
-line 3 of pathogenic_evidence() in a way the template cannot rewrite (...)
-  (set ANTHROPIC_API_KEY and use --rewriter auto to let Claude try)
+[Gate 2] pathogenic_evidence(): every call is on the chunk-safe allowlist -> OK
+[Data]   pathogenic_evidence() reads demo/data/clinvar.tsv (path written in the script)
+[Rewrite] local LLM (llama3.2) produced a chunked pathogenic_evidence() (25,000 rows at a time)
+[Gate 3] sandbox on a 5,000-row sample: outputs match -> OK
+[Verify] peak 193 MB, under the 500 MB cap -> OK
+VERIFIED PATCH: tracepatch_out/clinvar_needs_llm.patched.py
 ```
+
+The code the local model wrote:
+
+```python
+def pathogenic_evidence():
+    rows = 0
+    total = 0
+    for chunk in pd.read_csv(DATA_FILE, sep="\t", chunksize=CHUNKSIZE):
+        rows += len(chunk)
+        pathogenic = chunk[chunk["ClinSigSimple"] == 1]
+        total += pathogenic["NumberSubmitters"].sum()
+    return rows, total
+```
+
+Real run, `python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto`:
+
+```
+[Rewrite] local LLM (llama3.2) produced a chunked benign_evidence() (25,000 rows at a time)
+[Gate 3] REJECTED: output mismatch: value mismatch at result[0]: expected 34.0, got 5000.0
+   (the same on attempts 2 and 3)
+FAILED: no memory-safe, verified patch after 3 attempts (last problem: output mismatch: ...)
+```
+
+With `--rewriter template` (no LLM), both scripts stop at the rewrite step with
+a message saying the template cannot rewrite them and how to let an LLM try.
 
 ---
 
@@ -637,6 +697,7 @@ generated code would be a security hole. JSON is just data.
 
 1. **Static checks** (`_static_checks`) before running anything. It rejects if:
    - there is a placeholder (`TODO`, `FIXME`, `...`, `NotImplementedError`);
+   - the code assigns `CHUNKSIZE` itself (that would undo the sandbox's small chunks);
    - the code is invalid Python;
    - the function is missing;
    - `CHUNKSIZE` isn't used.
@@ -853,7 +914,7 @@ python3 -m tracepatch run SCRIPT [options]
 |---|---|---|
 | `--data FILE` | none | only needed when the script takes its data file as `sys.argv[1]`; not needed when the path is written in the script |
 | `--mem-limit-mb` | 500 | memory cap enforced by the watchdog |
-| `--rewriter` | template | `template`, `llm`, or `auto` (template first, then Claude) |
+| `--rewriter` | template | `template`; `llm` (Claude, needs `ANTHROPIC_API_KEY`); `local` (a model in Ollama on this machine); `auto` (template first, then whichever LLM is available) |
 | `--chunk-rows` | chosen from the row width | rows per chunk in the patched script |
 | `--apply` | off | replace SCRIPT with the verified patch (original kept as `SCRIPT.orig`) |
 | `--max-attempts` | 3 | 1, 2 or 3 only; the cap cannot be raised |
@@ -916,7 +977,8 @@ You run them from the project folder with no arguments: `python3 demo/clinvar_su
 | `clinvar_summary.py` | records, total lab submissions, average and maximum per record | **VERIFIED** | `len`, `sum`, `max` are chunk-safe |
 | `clinvar_pathogenic.py` | how many records are pathogenic: `(df["ClinSigSimple"] == 1).sum()` | **VERIFIED** | counting matching rows is chunk-safe |
 | `clinvar_median.py` | median submissions per record | **REFUSED** by Gate 2 | a median cannot be merged from chunks |
-| `clinvar_needs_llm.py` | submissions for pathogenic records only (filter, then sum) | **FAILED** at the rewrite step, with a hint | Gate 2 accepts it, but the template doesn't know this pattern; this is what the LLM rewriter is for |
+| `clinvar_needs_llm.py` | submissions for pathogenic records only (filter, then sum) | **VERIFIED** with `--rewriter auto` | the template doesn't know this pattern, so the local LLM writes the repair; the gates verify it |
+| `clinvar_llm_rejected.py` | most and fewest submissions among benign records | **FAILED** after 3 attempts with `--rewriter auto` | the local LLM's rewrite gives a wrong answer; Gate 3 rejects it every time |
 
 Real results on the 300,000 records:
 
@@ -1093,15 +1155,15 @@ Neither adds logic. **The project is the CLI.**
 
 ## 13. The tests
 
-Run all of them with `python3 -m pytest` (63 tests, about 20 s). Add `-v` to see each name.
+Run all of them with `python3 -m pytest` (66 tests, about 20 s). Add `-v` to see each name.
 
 | File | Count | What it proves |
 |---|---|---|
 | `test_gate2.py` | 7 | safe function accepted; `median` refused; bare `sorted()` refused; unknown method and unknown bare name refused; module-level crash refused (not raised); contract shape |
 | `test_tracer.py` | 4 | memory hog killed at the right line and function (exit 137); small script not flagged; normal exception not called OOM; no in-script sample → line `None` |
 | `test_oracle.py` | 10 | **float reordering accepted** although `!=`; chunked sum of 100k random numbers accepted; real difference rejected; int vs float; strings exact; length mismatch; type mismatch; NaN = NaN; DataFrames; tuples |
-| `test_sandbox.py` | 9 | good patch verified; **"keeps only the last chunk" bug caught**; missing CHUNKSIZE rejected; TODO rejected; exception; timeout; memory cap; **API key not leaked**; sample/imports helpers |
-| `test_rewriter.py` | 13 | template output **verified by Gate 3**; repeated expression computed once; **rows matching a condition counted correctly**; filter-then-sum refused; unsupported use refused; no loader; already chunked; LLM with fake client: fences stripped, feedback sent, refusal / CANNOT_CHUNK / bad Python, no key; **Claude only called when the template can't** |
+| `test_sandbox.py` | 10 | **a patch that sets `CHUNKSIZE` itself is rejected**; good patch verified; **"keeps only the last chunk" bug caught**; missing CHUNKSIZE rejected; TODO rejected; exception; timeout; memory cap; **API key not leaked**; sample/imports helpers |
+| `test_rewriter.py` | 15 | a bad model answer is retryable but `CANNOT_CHUNK` is not; an unreachable local model fails clearly; `auto` picks template / local / Claude correctly; template output **verified by Gate 3**; repeated expression computed once; **rows matching a condition counted correctly**; filter-then-sum refused; unsupported use refused; no loader; already chunked; LLM with fake client: fences stripped, feedback sent, refusal / CANNOT_CHUNK / bad Python, no key; **Claude only called when the template can't** |
 | `test_orchestrator.py` | 7 | full pipeline verified on 1M rows (output = uncapped pandas); median refused, nothing written; module-level refused; no problem under cap; **retry loop stops at exactly 3**; cap can't be raised; splice helpers |
 | `test_interactive.py` | 2 | dragged-in paths (quoted, escaped spaces) are cleaned; chunk size follows row width |
 | `test_script_only.py` | 9 | the three ways a script can name its data file are recognised; a script with the path inside is **repaired with no `--data`**; **Gate 3 really uses the sample** (a full read would break a 150 MB cap); a patch that reads a different file is rejected; `--apply` keeps a backup and the script then **survives the same limit that killed it** |
@@ -1165,6 +1227,14 @@ With 25,000 rows per chunk: 678 MB → about 180 MB, same answer. This is
 the best evidence that the full-scale check is needed: the sample test alone
 would have accepted that patch.
 
+**5. The first real LLM answer exposed a gap in Gate 3.**
+The first rewrite the local model produced contained `CHUNKSIZE = 10000` inside
+the function. Gate 3 only checked that a patch *uses* `CHUNKSIZE`, not that it
+doesn't *set* it. A patch that sets its own large value makes the 5,000-row
+sample fit in one chunk again, so the merging logic would go untested (the same
+problem as bug 2). Gate 3 now rejects any patch that assigns `CHUNKSIZE`, and a
+test covers it. We only found this by running a real model, not a mock.
+
 ---
 
 ## 15. Honest limits
@@ -1175,8 +1245,12 @@ Say these before the panel finds them:
 - **The template only handles simple aggregations**: sum / count / min / max of a
   column, `len`, and counting rows that match one condition. It refuses
   everything else, such as filtering rows and then aggregating.
-- **The LLM rewriter has never made a live API call.** It is implemented and
-  tested with a fake client; a real call needs a paid API key.
+- **The LLM has been run live only with a small local model** (`llama3.2`
+  through Ollama). It repaired one script correctly and got another wrong, which
+  the gates rejected. **The Claude rewriter has never made a live call** (it
+  needs a paid API key); it is tested with a fake client.
+- **We have not measured how often an LLM succeeds.** Two scripts are examples,
+  not an evaluation.
 - **Sample-based checking is not a proof.** Gate 3 uses the first 5,000 rows, not
   a random sample.
 - **The full-scale run proves memory, not correctness** (the original never
@@ -1235,6 +1309,7 @@ Each phase got its own branch and pull request (PR), and was merged into `main`:
 | #7 | `docs/learning-guide` | this guide |
 | #8 | `feature/demo-ui` | interactive mode, real ClinVar scripts, `--chunk-rows`, template-then-Claude, condition counting, clearer errors, optional walkthrough and web page, final docs |
 | #9 | `feature/script-only-flow` | data file read from the script itself, automatic chunk size, `limit`, `--apply` and `restore` |
+| #10 | `feature/local-llm` | local LLM rewriter (Ollama), first live LLM runs, retry of bad model answers, the `CHUNKSIZE` gap closed |
 
 **CONTRACT.md:** the July version split the work (A: Gates 1 and 2; B: Gate 3 and the LLM).
 On Oct 8 both authors agreed to these changes:
@@ -1342,7 +1417,7 @@ genomics-style workload. The demo data is synthetic.
 
 **Q: What are the main limitations?**
 See section 15: small allowlist, simple template, sample-based checking,
-process-level sandbox, CSV only, no live LLM test yet, macOS only.
+process-level sandbox, CSV only, the LLM tested live only with a small local model, macOS only.
 
 **Q: How is this different from Scalene or memory_profiler?**
 They detect and report memory use. TracePatch also repairs the code and verifies the repair.
@@ -1485,12 +1560,34 @@ itself rewrites one loader per function.
 #### About the LLM
 
 **Q: When is the LLM used?**
-Only with `--rewriter llm`, or with `auto` when the template can't handle the
-function and an API key is set.
+Only when the template cannot handle the function (with `--rewriter auto`), or
+when you ask for it directly with `--rewriter local` or `--rewriter llm`.
 
-**Q: Have you run it with the real LLM?**
-No. The LLM rewriter is implemented and tested with a fake client. A live call
-needs a paid API key, which we did not have. The verified demo uses the template.
+**Q: Which LLM do you use?**
+A local model, `llama3.2`, running on the laptop through Ollama: free, offline,
+no key. The same interface also has a Claude rewriter for when an API key is
+available. The gates are identical for both.
+
+**Q: Have you run it with a real LLM?**
+Yes, with the local model. On `clinvar_needs_llm.py` it wrote a correct repair,
+which was verified (563,725, identical to plain pandas). On
+`clinvar_llm_rejected.py` it wrote a wrong one, and Gate 3 rejected it three
+times. The Claude rewriter has not been run live, because it needs a paid key.
+
+**Q: Why a small local model and not a big one?**
+It is free and needs no internet. And it makes the point of the project
+clearer: the model can be weak, because nothing it writes is accepted without
+verification.
+
+**Q: The prompt contains an example. Isn't that giving it the answer?**
+It is one worked example of the *pattern* (a chunked loop), with different
+column names. That is standard one-shot prompting. Whether the model's answer
+is right is decided by the gates, not by the prompt; on the second script the
+same prompt produced a wrong answer and it was rejected.
+
+**Q: The LLM failed three times. Is that a failure of your tool?**
+No. It is the tool working: it refused to accept code it could not verify.
+A stronger model would probably succeed there; we have not tested that.
 
 **Q: How do you stop the LLM from writing wrong code?**
 We don't trust it. Its output must have valid syntax, define the same function,
@@ -1506,7 +1603,7 @@ security sandbox; we state that as a limit.
 #### About testing and your work
 
 **Q: How did you test it?**
-63 automated tests: unit tests for each gate, integration tests that pass a
+66 automated tests: unit tests for each gate, integration tests that pass a
 rewrite through Gate 3, and end-to-end tests of the CLI. Plus manual runs on the
 real ClinVar file, checked against plain pandas.
 
@@ -1580,7 +1677,7 @@ The verification idea is the part worth keeping.
 
 ```bash
 pip install -r requirements.txt          # install libraries
-python3 -m pytest                        # all 63 tests
+python3 -m pytest                        # all 66 tests
 
 # The full story on real data
 python3 demo/clinvar_summary.py                          # the script, run normally
@@ -1594,14 +1691,14 @@ python3 -m tracepatch run demo/clinvar_summary.py
 python3 -m tracepatch run demo/clinvar_summary.py --apply
 python3 -m tracepatch run demo/clinvar_pathogenic.py
 python3 -m tracepatch run demo/clinvar_median.py         # refused
-python3 -m tracepatch run demo/clinvar_needs_llm.py      # template can't; needs the LLM
+python3 -m tracepatch run demo/clinvar_needs_llm.py      # template alone can't (see below)
 
 echo $?                                  # exit code of the last command (0 / 1 / 2)
 cat tracepatch_out/clinvar_summary.diff  # see what was changed
 
-# With the LLM (needs a key; see the runbook)
-export ANTHROPIC_API_KEY=...             # in your own terminal only
-python3 -m tracepatch run demo/clinvar_needs_llm.py --rewriter auto
+# With the local LLM (Ollama must be running: check with `ollama list`)
+python3 -m tracepatch run demo/clinvar_needs_llm.py --rewriter auto      # LLM rewrite, verified
+python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto   # LLM rewrite, rejected
 
 # Synthetic data (no download; these scripts take the file as an argument)
 python3 demo/make_data.py
