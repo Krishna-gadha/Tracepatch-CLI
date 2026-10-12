@@ -22,7 +22,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 from tracepatch.gate1_tracer import TraceResult, trace
 from tracepatch.gate2_ast import run_gate2
@@ -44,6 +44,9 @@ class RunReport:
     diff_path: Optional[str] = None
     patched_output: str = ""
     log: List[str] = field(default_factory=list)
+    # Memory samples (seconds, MB) from Gate 1, for charts in the web demo.
+    before_samples: List[Tuple[float, float]] = field(default_factory=list)
+    after_samples: List[Tuple[float, float]] = field(default_factory=list)
 
     @property
     def exit_code(self) -> int:
@@ -89,7 +92,8 @@ def _show_line(source: str, line_no: int) -> str:
 def run(script: str, data: str, mem_limit_mb: float = 300,
         rewriter: Union[str, Rewriter] = "template", max_attempts: int = MAX_ATTEMPTS,
         sample_rows: int = 5000, out_dir: str = "tracepatch_out",
-        timeout_s: Optional[float] = 600, echo: Callable[[str], None] = print) -> RunReport:
+        timeout_s: Optional[float] = 600, echo: Callable[[str], None] = print,
+        chunk_rows: int = FULL_CHUNKSIZE) -> RunReport:
     if not 1 <= max_attempts <= MAX_ATTEMPTS:
         raise ValueError(f"max_attempts must be between 1 and {MAX_ATTEMPTS}")
     script, data = os.path.abspath(script), os.path.abspath(data)
@@ -113,14 +117,18 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
         f"with a {mem_limit_mb:.0f} MB cap ...")
     t = trace(script, [data], mem_limit_mb, timeout_s)
     report.before_peak_mb = t.peak_mb
+    report.before_samples = _mb_samples(t)
     if t.timed_out:
         return finish("failed", f"the original script ran longer than {timeout_s:.0f}s")
     if not t.killed_by_cap:
         if t.exit_code == 0:
             return finish("no_problem", f"peak {t.peak_mb:.0f} MB stayed under the "
                                         f"{mem_limit_mb:.0f} MB cap; nothing to fix")
-        return finish("failed", f"the script crashed for a non-memory reason "
-                                f"(exit {t.exit_code}):\n{t.stderr.strip()[-800:]}")
+        # Show the last line of the traceback (the actual error), not all of it.
+        error = (t.stderr.strip().splitlines() or ["no error output"])[-1]
+        return finish("failed", f"the script itself failed before any memory problem "
+                                f"(exit {t.exit_code}): {error}\n"
+                                f"  (is this the right dataset for this script?)")
     if t.peak_line is None:
         return finish("failed", "memory cap hit, but no sample landed inside the script, "
                                 "so the fault line is unknown")
@@ -150,8 +158,12 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             try:
                 patched_func = rw.rewrite(segment, func_name, feedback)
             except RewriteError as e:
-                return finish("failed", f"{rw.name} rewriter could not rewrite {func_name}(): {e}")
-            say(f"[Rewrite] {rw.name} rewriter produced a chunked {func_name}()")
+                hint = ""
+                if rw.name == "template" and not os.environ.get("ANTHROPIC_API_KEY"):
+                    hint = "\n  (set ANTHROPIC_API_KEY and use --rewriter auto to let Claude try)"
+                return finish("failed", f"{rw.name} rewriter could not rewrite {func_name}(): {e}{hint}")
+            who = getattr(rw, "used", None) or rw.name
+            say(f"[Rewrite] {who} rewriter produced a chunked {func_name}()")
 
             # ---- Gate 3: same answer as the original on a sample?
             preamble = extract_imports(current_source)
@@ -167,7 +179,9 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             say(f"[Gate 3] sandbox on a {sample_rows:,}-row sample: outputs match -> OK")
 
             # ---- Full-scale verification of the whole patched script.
-            candidate = ensure_chunksize(splice_function(current_source, func_name, patched_func))
+            # chunk_rows: wide tables (many text columns) need smaller chunks.
+            candidate = ensure_chunksize(splice_function(current_source, func_name, patched_func),
+                                         chunk_rows)
             cand_path = os.path.join(workdir, os.path.basename(script))
             with open(cand_path, "w") as f:
                 f.write(candidate)
@@ -176,6 +190,7 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
             full: TraceResult = trace(cand_path, [data], mem_limit_mb, timeout_s,
                                       env=clean_env(), cwd=workdir)
             report.after_peak_mb = full.peak_mb
+            report.after_samples = _mb_samples(full)
 
             if full.killed_by_cap:
                 say(f"[Verify] still spiked: {full.peak_mb:.0f} MB at line {full.peak_line} "
@@ -195,6 +210,7 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
 
             say(f"[Verify] peak {full.peak_mb:.0f} MB, under the {mem_limit_mb:.0f} MB cap -> OK")
             report.patched_output = full.stdout.strip()
+            shown_output = report.patched_output.replace("\n", "\n" + " " * 17)
             _write_outputs(report, script, original_source, candidate, out_dir)
             return finish("verified",
                           f"{report.patch_path}\n"
@@ -202,12 +218,16 @@ def run(script: str, data: str, mem_limit_mb: float = 300,
                           f"(reached {report.before_peak_mb:.0f} MB)\n"
                           f"  memory after:  {report.after_peak_mb:.0f} MB peak on the full file\n"
                           f"  diff:          {report.diff_path}\n"
-                          f"  output:        {report.patched_output}")
+                          f"  output:        {shown_output}")
 
         return finish("failed", f"no memory-safe, verified patch after {max_attempts} attempts "
                                 f"(last problem: {feedback})")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _mb_samples(t: TraceResult) -> List[Tuple[float, float]]:
+    return [(s[0], s[1] / (1024 * 1024)) for s in t.samples]
 
 
 def _write_outputs(report: RunReport, script: str, original: str, patched: str, out_dir: str):

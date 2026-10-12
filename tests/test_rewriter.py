@@ -111,8 +111,37 @@ def test_auto_picks_template_without_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert get_rewriter("auto").name == "template"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-test-value")
-    assert get_rewriter("auto").name == "llm"
+    assert get_rewriter("auto").name == "template+llm"
+
+
+def test_template_first_then_llm_only_when_needed():
+    from tracepatch.rewriter import TemplateThenLLMRewriter
+    fake = FakeClient("def f(p):\n    return 1\n")
+    rw = TemplateThenLLMRewriter(llm=LLMRewriter(client=fake))
+    simple = "def f(p):\n    df = pd.read_csv(p)\n    return df['a'].sum()\n"
+    assert "CHUNKSIZE" in rw.rewrite(simple, "f") and rw.used == "template"
+    assert fake.calls == []  # Claude not called for a simple function
+    hard = "def f(p):\n    df = pd.read_csv(p)\n    return df[df['a'] == 1]['b'].sum()\n"
+    rw.rewrite(hard, "f")
+    assert rw.used == "llm" and len(fake.calls) == 1
 
 
 def test_strip_fences_leaves_plain_code():
     assert strip_fences("def f():\n    pass") == "def f():\n    pass\n"
+
+
+def test_template_counts_rows_matching_a_condition(sample):
+    src = '''def high_depth(path):
+    df = pd.read_csv(path)
+    return len(df), (df["depth"] > 50).sum(), (df["chrom"] == "chrX").sum()
+'''
+    patched = TemplateRewriter().rewrite(src, "high_depth")
+    v = verify_patch(src, patched, "high_depth", sample, PREAMBLE)
+    assert v["verified"], v
+
+
+def test_template_refuses_filter_then_aggregate():
+    # Filtering rows and THEN aggregating another column is not a template pattern.
+    src = "def f(p):\n    df = pd.read_csv(p)\n    return df[df['a'] == 1]['b'].sum()\n"
+    with pytest.raises(RewriteError, match="template handles"):
+        TemplateRewriter().rewrite(src, "f")
