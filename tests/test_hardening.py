@@ -16,7 +16,6 @@ from tracepatch.orchestrator import apply_patch, ensure_chunksize, run
 from tracepatch.rewriter import TemplateRewriter
 
 PREAMBLE = "import pandas as pd\n"
-CAP_MB = 200
 
 
 def quiet(_):
@@ -30,18 +29,6 @@ def sample(tmp_path):
     pd.DataFrame({"chrom": rng.choice(["chr1", "chr2"], n),
                   "depth": rng.integers(1, 100, n)}).to_csv(tmp_path / "s.csv", index=False)
     return str(tmp_path / "s.csv")
-
-
-@pytest.fixture(scope="module")
-def big_csv(tmp_path_factory):
-    n = 1_000_000
-    rng = np.random.default_rng(4)
-    path = tmp_path_factory.mktemp("data") / "variants.csv"
-    pd.DataFrame({"chrom": rng.choice(["chr1", "chr2", "chrX"], n),
-                  "pos": rng.integers(1, 2_000_000, n),
-                  "ref": rng.choice(list("ACGT"), n), "alt": rng.choice(list("ACGT"), n),
-                  "depth": rng.integers(1, 100, n)}).to_csv(path, index=False)
-    return str(path)
 
 
 # ---- a function that PRINTS its result instead of returning it -------------
@@ -149,7 +136,7 @@ def test_zip_archive_is_refused_clearly(tmp_path):
         make_sample(str(src), str(tmp_path / "s.zip"))
 
 
-def test_gzip_script_is_repaired_end_to_end(big_csv, tmp_path):
+def test_gzip_script_is_repaired_end_to_end(big_csv, tmp_path, cap_mb):
     gz = tmp_path / "variants.csv.gz"
     with open(big_csv, "rb") as src, gzip.open(gz, "wb", compresslevel=1) as dst:
         dst.write(src.read())
@@ -157,21 +144,21 @@ def test_gzip_script_is_repaired_end_to_end(big_csv, tmp_path):
     script.write_text(f'import pandas as pd\n\nDATA = {str(gz)!r}\n\n\n'
                       'def total():\n    df = pd.read_csv(DATA)\n    return len(df), df["depth"].sum()\n\n\n'
                       'if __name__ == "__main__":\n    print(total())\n')
-    r = run(str(script), None, CAP_MB, out_dir=str(tmp_path / "out"), echo=quiet)
+    r = run(str(script), None, cap_mb, out_dir=str(tmp_path / "out"), echo=quiet)
     assert r.status == "verified", r.log
     assert str(pd.read_csv(big_csv)["depth"].sum()) in r.patched_output
 
 
 # ---- chunks too big for the limit: retry with smaller chunks ----------------
 
-def test_chunk_size_is_halved_until_it_fits(big_csv, tmp_path):
+def test_chunk_size_is_halved_until_it_fits(big_csv, tmp_path, cap_mb):
     fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sum_pipeline.py")
     # Start with the whole file as one "chunk": certain to break the cap.
-    r = run(fixture, big_csv, CAP_MB, out_dir=str(tmp_path), echo=quiet, chunk_rows=1_000_000)
+    r = run(fixture, big_csv, cap_mb, out_dir=str(tmp_path), echo=quiet, chunk_rows=1_000_000)
     assert r.status == "verified", r.log
     assert r.attempts > 1
     assert any("trying" in line and "rows at a time" in line for line in r.log)
-    assert r.after_peak_mb < CAP_MB
+    assert r.after_peak_mb < cap_mb
 
 
 def test_ensure_chunksize_can_replace_the_value():
@@ -244,18 +231,18 @@ def test_function_that_returns_the_whole_table_is_explained():
     assert "returns the whole table" in uncallable_reason(direct, "load", find_data_ref(direct, "load"))
 
 
-def test_second_load_in_the_same_function_fails_clearly(big_csv, tmp_path):
+def test_second_load_in_the_same_function_fails_clearly(big_csv, tmp_path, cap_mb):
     script = tmp_path / "two.py"
     script.write_text(f'import pandas as pd\n\nDATA = {big_csv!r}\n\n\ndef both():\n'
                       '    a = pd.read_csv(DATA)\n    total = a["depth"].sum()\n'
                       '    b = pd.read_csv(DATA)\n    return total, len(b)\n\n\nprint(both())\n')
-    r = run(str(script), None, CAP_MB, out_dir=str(tmp_path / "out"), echo=quiet)
+    r = run(str(script), None, cap_mb, out_dir=str(tmp_path / "out"), echo=quiet)
     assert r.status == "failed" and "one load per function" in r.message
     assert not (tmp_path / "out").exists()  # nothing accepted, nothing written
 
 
-def test_web_address_and_flat_script_messages(big_csv, tmp_path):
+def test_web_address_and_flat_script_messages(big_csv, tmp_path, cap_mb):
     flat = tmp_path / "flat.py"
     flat.write_text(f'import pandas as pd\ndf = pd.read_csv({big_csv!r})\nprint(len(df))\n')
-    r = run(str(flat), None, CAP_MB, out_dir=str(tmp_path / "out"), echo=quiet)
+    r = run(str(flat), None, cap_mb, out_dir=str(tmp_path / "out"), echo=quiet)
     assert r.status == "refused" and "inside a function" in r.message and "def main()" in r.message

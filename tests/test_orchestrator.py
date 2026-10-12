@@ -8,48 +8,34 @@ from tracepatch.orchestrator import ensure_chunksize, run, splice_function
 from tracepatch.rewriter import Rewriter
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
-# Measured: eager read of 1M rows peaks ~270 MB, the chunked version ~110 MB.
-CAP_MB = 200
-
-
-@pytest.fixture(scope="module")
-def big_csv(tmp_path_factory):
-    n = 1_000_000
-    rng = np.random.default_rng(0)
-    path = tmp_path_factory.mktemp("data") / "variants.csv"
-    pd.DataFrame({"chrom": rng.choice(["chr1", "chr2", "chrX"], n),
-                  "pos": rng.integers(1, 2_000_000, n),
-                  "ref": rng.choice(list("ACGT"), n), "alt": rng.choice(list("ACGT"), n),
-                  "depth": rng.integers(1, 100, n)}).to_csv(path, index=False)
-    return str(path)
 
 
 def quiet(_):
     pass
 
 
-def test_safe_pipeline_is_patched_and_verified(big_csv, tmp_path):
-    r = run(os.path.join(FIX, "sum_pipeline.py"), big_csv, CAP_MB,
+def test_safe_pipeline_is_patched_and_verified(big_csv, tmp_path, cap_mb):
+    r = run(os.path.join(FIX, "sum_pipeline.py"), big_csv, cap_mb,
             out_dir=str(tmp_path), echo=quiet)
     assert r.status == "verified", r.log
     assert r.attempts == 1
-    assert r.before_peak_mb > CAP_MB > r.after_peak_mb
+    assert r.before_peak_mb > cap_mb > r.after_peak_mb
     truth = pd.read_csv(big_csv)["depth"]
     assert f"calls={len(truth)} total_depth={truth.sum()}" in r.patched_output
     assert "chunksize=CHUNKSIZE" in open(r.patch_path).read()
 
 
-def test_median_pipeline_is_refused_and_nothing_written(big_csv, tmp_path):
+def test_median_pipeline_is_refused_and_nothing_written(big_csv, tmp_path, cap_mb):
     out = tmp_path / "out"
-    r = run(os.path.join(FIX, "median_pipeline.py"), big_csv, CAP_MB,
+    r = run(os.path.join(FIX, "median_pipeline.py"), big_csv, cap_mb,
             out_dir=str(out), echo=quiet)
     assert r.status == "refused" and r.exit_code == 2
     assert "median" in r.message and "nothing was rewritten" in r.message
     assert not out.exists()
 
 
-def test_module_level_crash_is_refused_gracefully(big_csv, tmp_path):
-    r = run(os.path.join(FIX, "module_level_pipeline.py"), big_csv, CAP_MB,
+def test_module_level_crash_is_refused_gracefully(big_csv, tmp_path, cap_mb):
+    r = run(os.path.join(FIX, "module_level_pipeline.py"), big_csv, cap_mb,
             out_dir=str(tmp_path), echo=quiet)
     assert r.status == "refused"
     assert "module level" in r.message
@@ -79,8 +65,8 @@ class WastefulRewriter(Rewriter):
 '''
 
 
-def test_retry_loop_stops_after_three_attempts(big_csv, tmp_path):
-    r = run(os.path.join(FIX, "sum_pipeline.py"), big_csv, CAP_MB,
+def test_retry_loop_stops_after_three_attempts(big_csv, tmp_path, cap_mb):
+    r = run(os.path.join(FIX, "sum_pipeline.py"), big_csv, cap_mb,
             rewriter=WastefulRewriter(), out_dir=str(tmp_path), echo=quiet)
     assert r.status == "failed" and r.exit_code == 1
     assert r.attempts == 3
