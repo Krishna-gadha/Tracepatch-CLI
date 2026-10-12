@@ -22,3 +22,6 @@ tracepatch_out/
 
 # Web demo uploads and outputs
 demo/uploads/
+
+# Backup made by --apply
+*.orig

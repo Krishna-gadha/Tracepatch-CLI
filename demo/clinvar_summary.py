@@ -1,26 +1,27 @@
-"""Our lab's analysis script: summarise the ClinVar variant table (NCBI).
+"""Check a ClinVar release: how many records, and how much lab evidence?
 
-Download (real public data):
-  curl -s https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz \\
-    | gunzip -c | head -n 300001 > demo/data/clinvar.tsv
+ClinVar (NCBI) is the public database of human genetic variants and what
+clinical labs report about them. Run from the project folder:
+
+    python3 demo/clinvar_summary.py
 """
-
-import sys
 
 import pandas as pd
 
+DATA_FILE = "demo/data/clinvar.tsv"
 
-def clinvar_summary(path):
-    df = pd.read_csv(path, sep="\t")
-    variants = len(df)
+
+def clinvar_summary():
+    df = pd.read_csv(DATA_FILE, sep="\t")
+    records = len(df)
     submissions = df["NumberSubmitters"].sum()
     most = df["NumberSubmitters"].max()
-    return variants, submissions, most
+    return records, submissions, most
 
 
 if __name__ == "__main__":
-    variants, submissions, most = clinvar_summary(sys.argv[1])
-    print("Variant records:", variants)
+    records, submissions, most = clinvar_summary()
+    print("Variant records:", records)
     print("Lab submissions:", submissions)
-    print("Average submissions per record:", round(submissions / variants, 2))
+    print("Average submissions per record:", round(submissions / records, 2))
     print("Most submissions for one record:", most)

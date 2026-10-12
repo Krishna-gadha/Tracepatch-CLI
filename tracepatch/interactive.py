@@ -1,18 +1,19 @@
 """Interactive mode: `python3 -m tracepatch` with no arguments.
 
-Asks for the dataset and the analysis script (drag a file into the terminal
-to paste its path), then runs the normal pipeline via orchestrator.run().
+Asks for the analysis script (drag the file into the terminal to paste its
+path). If the script has its data file's path written inside, that file is
+used; otherwise it asks for the data file too. Then it runs the normal
+pipeline via orchestrator.run().
 """
 
 import ast
 import os
 import shlex
 
-from tracepatch.orchestrator import run
+from tracepatch.dataref import find_data_ref
+from tracepatch.orchestrator import auto_chunk_rows, run  # noqa: F401 (auto_chunk_rows re-exported)
 
 DEFAULT_CAP_MB = 500
-TARGET_CHUNK_BYTES = 16 * 1024 * 1024  # aim for ~16 MB of file per chunk
-MIN_CHUNK_ROWS, MAX_CHUNK_ROWS = 10_000, 100_000
 
 
 def _c(code: str, text: str) -> str:
@@ -74,13 +75,6 @@ def describe_script(path: str):
     return None, None, None
 
 
-def auto_chunk_rows(size: int, rows: int) -> int:
-    """Wide rows (many text columns) need fewer rows per chunk."""
-    bytes_per_row = size / max(rows, 1)
-    rows_per_chunk = round(TARGET_CHUNK_BYTES / bytes_per_row / 5000) * 5000  # tidy number
-    return int(max(MIN_CHUNK_ROWS, min(MAX_CHUNK_ROWS, rows_per_chunk)))
-
-
 def show_diff(path: str):
     with open(path) as f:
         for line in f.read().splitlines():
@@ -102,15 +96,18 @@ def main() -> int:
         return 130
 
 
+def _ask_yes(prompt: str, default: bool) -> bool:
+    try:
+        answer = input(prompt).strip().lower()
+    except EOFError:
+        return False
+    return default if answer == "" else answer in ("y", "yes")
+
+
 def _main() -> int:
     print(_c("1;34", "\nTracePatch") + " — find an out-of-memory crash, repair it, verify the repair\n")
 
-    print(_c("1", "1. Upload your dataset"))
-    data = ask_file("   Drag the data file here and press Enter: ", (".csv", ".tsv", ".txt"))
-    size, rows, columns = describe_dataset(data)
-    print(_c("32", f"   ✓ {os.path.basename(data)}: {size / 1048576:.0f} MB, {rows:,} rows, {len(columns)} columns\n"))
-
-    print(_c("1", "2. Upload your analysis script"))
+    print(_c("1", "1. Your analysis script"))
     script = ask_file("   Drag the .py file here and press Enter: ", (".py",))
     func, line_no, line_text = describe_script(script)
     if func:
@@ -118,6 +115,24 @@ def _main() -> int:
         print(f"       {line_no} | {line_text}\n")
     else:
         print(_c("33", f"   ! {os.path.basename(script)}: no read_csv inside a function found\n"))
+
+    # Which data file? Read it from the script if it is written there.
+    print(_c("1", "2. The dataset"))
+    with open(script) as f:
+        ref = find_data_ref(f.read())
+    data = None
+    if ref is not None and ref.kind in ("literal", "global") and os.path.isfile(ref.path):
+        data_file = os.path.abspath(ref.path)
+        print(f"   The script reads {ref.path} (path written in the script)")
+    else:
+        if ref is not None and ref.kind in ("literal", "global"):
+            print(_c("33", f"   ! The script reads {ref.path}, but that file was not found from here"))
+        else:
+            print("   The script takes its data file as an argument.")
+        data = data_file = ask_file("   Drag the data file here and press Enter: ", (".csv", ".tsv", ".txt"))
+    size, rows, columns = describe_dataset(data_file)
+    print(_c("32", f"   ✓ {os.path.basename(data_file)}: {size / 1048576:.0f} MB, {rows:,} rows, "
+                   f"{len(columns)} columns\n"))
 
     print(_c("1", "3. Memory limit"))
     cap = None
@@ -133,20 +148,21 @@ def _main() -> int:
         except ValueError:
             print(_c("31", "   ✗ Please type a number of at least 50, or just press Enter"))
             cap = None
-    chunk_rows = auto_chunk_rows(size, rows)
     print()
 
     print(_c("1", "Running TracePatch ...\n"))
     # Template first; Claude only if the template can't and ANTHROPIC_API_KEY is set.
-    report = run(script, data, cap, rewriter="auto", chunk_rows=chunk_rows)
+    report = run(script, data, cap, rewriter="auto")
 
     if report.diff_path and os.path.exists(report.diff_path):
-        try:
-            again = input("\nShow what was changed? [Y/n]: ").strip().lower()
-        except EOFError:
-            again = "n"
-        if again in ("", "y", "yes"):
+        if _ask_yes("\nShow what was changed? [Y/n]: ", default=True):
             print()
             show_diff(report.diff_path)
+        if _ask_yes(f"\nReplace {os.path.basename(script)} with the repaired version? "
+                    f"(the original is kept as {os.path.basename(script)}.orig) [y/N]: ", default=False):
+            from tracepatch.orchestrator import apply_patch
+            with open(report.patch_path) as f:
+                apply_patch(script, f.read())
+            print(_c("32", f"   ✓ {os.path.basename(script)} now contains the repair"))
     print()
     return report.exit_code
