@@ -310,7 +310,7 @@ is a working prototype of a method.
 | It saves memory | 678 MB → about 180 MB on the ClinVar file |
 | It refuses unsafe cases | Live: the median script |
 | It verifies AI-written code | Live: one model rewrite verified, one rejected |
-| It is tested | 92 automated tests, run automatically on Linux and macOS |
+| It is tested | 94 automated tests, run automatically on Linux and macOS |
 | We tried to break it | 25 awkward cases; none crashes (RISK_REVIEW.md) |
 
 ---
@@ -407,7 +407,7 @@ prints instead of returning was "verified" with nothing compared; equal-sized
 test chunks hid a wrong formula. We found these by attacking our own tool.
 
 **Q: How do you know your own tool works?**
-92 automated tests, run automatically on Linux and macOS for every change, and
+94 automated tests, run automatically on Linux and macOS for every change, and
 a risk review of 25 awkward cases.
 
 ---

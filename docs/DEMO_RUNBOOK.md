@@ -25,7 +25,7 @@ applied the repair; undo it with `python3 -m tracepatch restore demo/clinvar_sum
 ```bash
 python3 -m pytest
 ```
-Must end with `92 passed`.
+Must end with `94 passed`.
 
 ```bash
 ollama list
@@ -161,7 +161,7 @@ python3 -m tracepatch run demo/clinvar_median.py
 python3 -m pytest
 ```
 
-> "92 automated tests. They cover every gate, a patch with a deliberate bug that
+> "94 automated tests. They cover every gate, a patch with a deliberate bug that
 > Gate 3 must catch, the retry loop stopping after three attempts, and every
 > problem we found when we attacked our own tool. They also run automatically on
 > Linux for every change."
@@ -235,7 +235,7 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 | Number tolerance | relative 1e-5, absolute 1e-8 |
 | Retry cap | 3 attempts |
 | Allowlist | 8 methods + 6 builtins |
-| Tests | 92 |
+| Tests | 94 |
 | Awkward cases tried in the risk review | 25, none crashes |
 | LLM | `llama3.2` (3 billion parameters, 2 GB), local through Ollama |
 | Exit codes | 0 verified, 2 refused, 1 failed, 137 killed by `limit` |
