@@ -155,9 +155,9 @@ def test_chunk_size_is_halved_when_a_chunk_is_too_big(big_csv, tmp_path, cap_mb)
     fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sum_pipeline.py")
     cap = cap_mb
     # Start with the whole file as one "chunk": certain to break the cap.
-    r = run(fixture, big_csv, cap, out_dir=str(tmp_path / "out"), echo=quiet, chunk_rows=1_000_000)
+    r = run(fixture, big_csv, cap, out_dir=str(tmp_path / "out"), echo=quiet, chunk_rows=2_000_000)
     halvings = [line for line in r.log if "trying" in line and "rows at a time" in line]
-    assert halvings and "trying 500,000 rows at a time" in halvings[0], r.log
+    assert halvings and "trying 1,000,000 rows at a time" in halvings[0], r.log
     # Halving repeats only the full-scale check: the rewrite and Gate 3 ran once.
     assert sum("[Rewrite]" in line for line in r.log) == 1
     assert sum("[Gate 3]" in line for line in r.log) == 1
@@ -255,3 +255,25 @@ def test_web_address_and_flat_script_messages(big_csv, tmp_path, cap_mb):
     flat.write_text(f'import pandas as pd\ndf = pd.read_csv({big_csv!r})\nprint(len(df))\n')
     r = run(str(flat), None, cap_mb, out_dir=str(tmp_path / "out"), echo=quiet)
     assert r.status == "refused" and "inside a function" in r.message and "def main()" in r.message
+
+
+def test_a_kill_anywhere_in_the_chunk_loop_counts_as_a_chunk_that_is_too_big():
+    from tracepatch.orchestrator import inside_chunk_loop
+    src = (
+        "import pandas as pd\n"                                             # 1
+        "def f(path):\n"                                                    # 2
+        "    parts = []\n"                                                  # 3
+        "    for chunk in pd.read_csv(path, chunksize=CHUNKSIZE):\n"        # 4
+        "        parts.append(chunk['depth'].sum())\n"                      # 5
+        "    everything = pd.read_csv(path)\n"                              # 6
+        "    return sum(parts)\n")                                          # 7
+    assert inside_chunk_loop(src, "f", 4)       # the line that reads a chunk
+    assert inside_chunk_loop(src, "f", 5)       # the loop body: recorded a moment later
+    assert not inside_chunk_loop(src, "f", 6)   # a separate, un-chunked load: a new fault
+    assert not inside_chunk_loop(src, "f", 3)
+    assert not inside_chunk_loop("def g(p):\n    return pd.read_csv(p)\n", "g", 2)
+
+
+def test_headroom_constant_is_a_real_margin():
+    from tracepatch.orchestrator import HEADROOM
+    assert 0.5 < HEADROOM < 1.0

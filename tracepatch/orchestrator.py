@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple, Union
 
 from tracepatch.datafile import UnsupportedDataFile, make_sample, sample_stats
-from tracepatch.dataref import find_data_ref, uncallable_reason
+from tracepatch.dataref import find_data_ref, is_loader_call, uncallable_reason
 from tracepatch.gate1_tracer import TraceResult, trace
 from tracepatch.gate2_ast import run_gate2
 from tracepatch.gate3_sandbox import ORIGINAL_FAILED, clean_env, extract_imports, verify_patch
@@ -35,6 +35,9 @@ MAX_ATTEMPTS = 3          # hard cap; see module docstring
 FULL_CHUNKSIZE = 100_000  # most rows per chunk in the real (full-scale) run
 MIN_CHUNK_ROWS = 10_000
 MIN_RETRY_CHUNK_ROWS = 1_000  # halving on a full-scale spike never goes below this
+# Memory varies a little from run to run. A repair that only just fits could be
+# killed next time, so we want the peak to be at most this fraction of the limit.
+HEADROOM = 0.9
 TARGET_CHUNK_BYTES = 16 * 1024 * 1024  # aim for ~16 MB of file per chunk
 
 
@@ -293,7 +296,7 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                 if full.peak_line is None:
                     return finish("failed", "patched script hit the cap at an unknown line")
                 in_chunk_loop = (full.peak_function == func_name
-                                 and "chunksize" in _show_line(candidate, full.peak_line))
+                                 and inside_chunk_loop(candidate, func_name, full.peak_line))
                 if in_chunk_loop and rows_per_chunk > MIN_RETRY_CHUNK_ROWS:
                     # The patch already gave the right answer in Gate 3; one chunk is
                     # simply too big for this limit. Only the chunk size changes.
@@ -320,6 +323,15 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                     return finish("failed", feedback)
                 continue
 
+            tight = full.peak_mb > HEADROOM * mem_limit_mb
+            if tight and rows_per_chunk > MIN_RETRY_CHUNK_ROWS and attempt < max_attempts:
+                # It fits, but only just. Smaller chunks give a safer margin.
+                smaller = max(MIN_RETRY_CHUNK_ROWS, rows_per_chunk // 2)
+                say(f"[Verify] peak {full.peak_mb:.0f} MB fits under the {mem_limit_mb:.0f} MB cap, but only "
+                    f"just; memory varies between runs, so trying {smaller:,} rows at a time")
+                feedback = f"{rows_per_chunk:,} rows per chunk left too little headroom"
+                retry_smaller = (func_name, patched_func, ref, smaller)
+                continue
             say(f"[Verify] peak {full.peak_mb:.0f} MB, under the {mem_limit_mb:.0f} MB cap -> OK")
             report.patched_output = full.stdout.strip()
             shown_output = report.patched_output.replace("\n", "\n" + " " * 17)
@@ -333,7 +345,8 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                           f"{report.patch_path}\n"
                           f"  memory before: killed at the {mem_limit_mb:.0f} MB cap "
                           f"(reached {report.before_peak_mb:.0f} MB)\n"
-                          f"  memory after:  {report.after_peak_mb:.0f} MB peak on the full file\n"
+                          f"  memory after:  {report.after_peak_mb:.0f} MB peak on the full file"
+                          f"{' (close to the limit: memory varies a little between runs)' if tight else ''}\n"
                           f"  diff:          {report.diff_path}\n"
                           f"  output:        {shown_output}{applied}")
 
@@ -341,6 +354,29 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                                 f"(last problem: {feedback})")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def inside_chunk_loop(source: str, func_name: str, line_no: int) -> bool:
+    """Was the script killed while working through chunks in func_name?
+
+    The kill can be recorded on the line that reads a chunk OR on any line of
+    the loop body (the sample is taken every 50 ms, a moment after the memory
+    was actually taken). So any line inside a `for` loop of a function that
+    reads with chunksize= counts, as does the chunked read_csv line itself.
+    A separate, un-chunked read_csv elsewhere in the function does not."""
+    tree = ast.parse(source)
+    for func in ast.walk(tree):
+        if not (isinstance(func, ast.FunctionDef) and func.name == func_name):
+            continue
+        chunked_reads = [n for n in ast.walk(func) if is_loader_call(n)
+                         and any(k.arg == "chunksize" for k in n.keywords)]
+        if not chunked_reads:
+            return False
+        if any(n.lineno <= line_no <= n.end_lineno for n in chunked_reads):
+            return True
+        return any(isinstance(n, ast.For) and n.lineno <= line_no <= n.end_lineno
+                   for n in ast.walk(func))
+    return False
 
 
 def _is_import_line(source: str, line_no: int) -> bool:

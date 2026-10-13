@@ -37,7 +37,7 @@ def measure(script: str, data: str, work_dir: str):
                 break
             dst.write(line)
     baseline = trace(script, [tiny], mem_limit_mb=NO_LIMIT_MB).peak_mb
-    if eager - baseline < 40:
+    if eager - baseline < 100:
         pytest.skip(f"loading the test data costs only {eager - baseline:.0f} MB here: "
                     "too little to simulate an out-of-memory kill")
     return baseline, eager
@@ -50,9 +50,11 @@ def measure_cap(script: str, data: str, work_dir: str, fraction: float = 0.55) -
 
 @pytest.fixture(scope="session")
 def big_csv(tmp_path_factory):
-    """1,000,000 rows. Mostly numbers, whose memory use is the same on every
-    pandas version (8 bytes per value), so the measurement is stable."""
-    n = 1_000_000
+    """2,000,000 rows. Mostly numbers, whose memory use is the same on every
+    pandas version (8 bytes per value), so the measurement is stable. Large on
+    purpose: the gap between "loaded all at once" and "chunked" must be much
+    bigger than the 10-15% by which memory varies from run to run."""
+    n = 2_000_000
     rng = np.random.default_rng(0)
     table = {"chrom": rng.choice(["chr1", "chr2", "chrX"], n),
              "pos": rng.integers(1, 2_000_000, n),
