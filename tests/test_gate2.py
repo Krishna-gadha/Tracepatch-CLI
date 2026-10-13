@@ -82,3 +82,18 @@ def test_run_gate2_contract_shape_on_success():
     out = run_gate2(SAFE, 4)
     assert out["safe"] is True
     assert out["source_segment"].startswith("def total_depth")
+
+
+def test_refusal_comes_with_advice():
+    out = run_gate2(MEDIAN, 4)
+    assert out["safe"] is False
+    assert any("median" in tip and "usecols" in tip for tip in out["advice"])
+
+
+def test_mean_is_refused_with_the_form_that_can_be_repaired():
+    src = MEDIAN.replace(".median()", ".mean()")
+    out = run_gate2(src, 4)
+    assert out["safe"] is False
+    assert any(".sum() / df[col].count()" in tip for tip in out["advice"])
+    unknown = run_gate2(UNKNOWN, 4)
+    assert any("frobnicate()" in tip for tip in unknown["advice"])

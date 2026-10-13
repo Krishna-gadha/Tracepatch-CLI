@@ -6,6 +6,7 @@
   python -m tracepatch run SCRIPT                   the same steps, with every option exposed
   python -m tracepatch limit SCRIPT                 just run SCRIPT under a memory limit
   python -m tracepatch restore SCRIPT               undo --apply (bring back SCRIPT.orig)
+  python -m tracepatch doctor                       check that everything (and the AI model) is ready
 
 Exit codes: 0 verified patch (or nothing to fix), 2 refused by Gate 2,
 1 failed.
@@ -38,7 +39,7 @@ def limit(script: str, script_args, mem_limit_mb: float) -> int:
     return result.returncode
 
 
-COMMANDS = ("fix", "run", "limit", "restore")
+COMMANDS = ("fix", "run", "limit", "restore", "doctor")
 
 
 def fix(script: str, data, mem_limit_mb: float) -> int:
@@ -108,7 +109,12 @@ def main(argv=None) -> int:
     m.add_argument("--mem-limit-mb", type=float, default=DEFAULT_CAP_MB)
     u = sub.add_parser("restore", help="undo --apply: bring back SCRIPT.orig")
     u.add_argument("script")
+    sub.add_parser("doctor", help="check that the libraries and the AI model are ready")
     a = p.parse_args(argv)
+
+    if a.command == "doctor":
+        from tracepatch.doctor import main as doctor_main
+        return doctor_main()
 
     if a.command == "fix":
         return fix(a.script, a.data, a.mem_limit_mb)

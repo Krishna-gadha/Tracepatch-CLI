@@ -95,6 +95,38 @@ LOADER_METHODS = {
 }
 
 
+# What a person can do when an operation is refused. This changes no decision:
+# the operation is still refused. It only makes the refusal useful.
+COLUMNS_HINT = "If the script needs only a few columns, load just those: read_csv(..., usecols=[...])."
+ADVICE = {
+    "mean": "A mean can be written as a sum divided by a count, df[col].sum() / df[col].count(), "
+            "and TracePatch can repair that form.",
+    "median": "A median needs every value at once, so it cannot be merged from pieces. " + COLUMNS_HINT,
+    "quantile": "A quantile needs every value at once, so it cannot be merged from pieces. " + COLUMNS_HINT,
+    "mode": "The most common value in each piece is not the most common overall. " + COLUMNS_HINT,
+    "sort_values": "Sorting needs the whole table in order. " + COLUMNS_HINT,
+    "sort_index": "Sorting needs the whole table in order. " + COLUMNS_HINT,
+    "sorted": "Sorting needs every value at once. " + COLUMNS_HINT,
+    "rank": "A rank depends on every other row. " + COLUMNS_HINT,
+    "drop_duplicates": "The same row can appear in different pieces, so duplicates cannot be removed "
+                       "piece by piece. " + COLUMNS_HINT,
+    "unique": "The same value can appear in different pieces. " + COLUMNS_HINT,
+    "nunique": "The same value can appear in different pieces, so per-piece counts cannot be added. " + COLUMNS_HINT,
+    "groupby": "TracePatch does not repair group-by yet. " + COLUMNS_HINT,
+    "pivot_table": "TracePatch does not repair pivot tables yet. " + COLUMNS_HINT,
+    "merge": "Joining needs both tables. " + COLUMNS_HINT,
+    "join": "Joining needs both tables. " + COLUMNS_HINT,
+    "std": "A standard deviation is not a simple merge of per-piece results; TracePatch does not repair it yet.",
+    "var": "A variance is not a simple merge of per-piece results; TracePatch does not repair it yet.",
+    "cumsum": "Each row depends on all the rows before it, across piece boundaries.",
+    "shift": "Each row depends on its neighbouring rows, across piece boundaries.",
+    "diff": "Each row depends on its neighbouring rows, across piece boundaries.",
+    "rolling": "Each window can span two pieces.",
+}
+UNKNOWN_ADVICE = ("TracePatch does not know {name}(), so it does not assume it is safe to do in pieces. "
+                  "If it is a helper of your own, do the calculation directly in the function that loads the data.")
+
+
 @dataclass
 class DecomposabilityReport:
     is_safe: bool
@@ -111,6 +143,15 @@ class DecomposabilityReport:
         for name, line in self.unknown_calls:
             parts.append(f"unrecognised call (default-deny): {name}() at line {line}")
         return "; ".join(parts)
+
+    def advice(self) -> List[str]:
+        """One suggestion per refused operation: what the person can do instead."""
+        hints = []
+        for name, _ in self.unsafe_calls + self.unknown_calls:
+            hint = ADVICE.get(name, UNKNOWN_ADVICE.format(name=name))
+            if hint not in hints:
+                hints.append(hint)
+        return hints
 
 
 def isolate_function(source_code: str, line_no: int) -> Tuple[str, ast.FunctionDef]:
@@ -175,6 +216,7 @@ def run_gate2(source_code: str, line_no: int) -> dict:
         }
     report = check_decomposability(func)
     if not report.is_safe:
-        return {"safe": False, "reason": report.explain(), "source_segment": None}
+        return {"safe": False, "reason": report.explain(), "source_segment": None,
+                "advice": report.advice()}
     return {"safe": True, "reason": "", "source_segment": segment,
             "function_name": func.name}

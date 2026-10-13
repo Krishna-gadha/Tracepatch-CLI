@@ -43,10 +43,27 @@ script ─► Gate 1 ─► Gate 2 ─► Rewrite ─► Gate 3 ─► Full-scal
 
 Python 3.9+.
 
+Install it as a package (this adds the `tracepatch` command):
+
+```bash
+pip install .
+tracepatch doctor          # checks the libraries and the AI model, and says how to fix anything missing
+```
+
+Or run it straight from this folder without installing:
+
 ```bash
 pip install -r requirements.txt
+python3 -m tracepatch doctor
 python3 -m pytest
 ```
+
+Everywhere below, `python3 -m tracepatch ...` and `tracepatch ...` are the same.
+
+**The AI model** is not inside the package (a model is about 2 GB). TracePatch
+uses a free local model through [Ollama](https://ollama.com): install Ollama,
+run `ollama pull llama3.2` once, and `tracepatch doctor` will confirm it. Without
+it, TracePatch still does every repair its built-in rules cover.
 
 ### Commands
 
@@ -57,6 +74,7 @@ python3 -m pytest
 | `python3 -m tracepatch run SCRIPT` | the same steps with every option exposed; does not replace the script unless `--apply` |
 | `python3 -m tracepatch limit SCRIPT` | only run SCRIPT under a memory limit, as a cluster job would (no repair) |
 | `python3 -m tracepatch restore SCRIPT` | undo: put the original script back |
+| `python3 -m tracepatch doctor` | check that the libraries and the AI model are ready |
 
 TracePatch reads the data file's path **from the script** (written in the
 `read_csv` call or as a constant at the top). If the script takes the file as
@@ -91,7 +109,7 @@ python3 -m tracepatch restore demo/clinvar_summary.py      # put the original ba
 |---|---|---|
 | `demo/clinvar_summary.py` | records, lab submissions, average and max per record | **verified**: 678 MB → about 180 MB |
 | `demo/clinvar_pathogenic.py` | how many records are pathogenic | **verified**: 115,014 of 300,000 |
-| `demo/clinvar_median.py` | median submissions | **refused** by Gate 2 |
+| `demo/clinvar_median.py` | median submissions | **refused** by Gate 2, with advice that works (load only the needed column: 107 MB) |
 | `demo/clinvar_needs_llm.py` | filter rows, then sum | with `--rewriter auto`: the local LLM writes the repair, **verified** |
 | `demo/clinvar_llm_rejected.py` | max and min of filtered rows | with `--rewriter auto`: the local LLM's repair is wrong, **rejected** by Gate 3 |
 
@@ -170,7 +188,7 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - [x] Data file read from the script itself (path in the call, a top-level constant, or an argument)
 - [x] Demo on real ClinVar data: two scripts verified, median refused
 - [x] Demo on synthetic data: `safe_pipeline.py` verified, `unsafe_pipeline.py` refused
-- [x] Test suite (`python3 -m pytest`): 94 tests passing, run automatically on Linux and macOS
+- [x] Test suite (`python3 -m pytest`): 98 tests passing, run automatically on Linux and macOS
 - [x] Risk review: 25 awkward scripts and data files, none crashes (`docs/RISK_REVIEW.md`)
 - [x] LLM rewriting, run live with a local model (`llama3.2` through Ollama): one script repaired and verified, one wrong repair rejected by Gate 3
 - [ ] `LLMRewriter` (Claude) against the real API: implemented, but only tested with a fake client. **No live Claude call has been made** (needs a paid key).
