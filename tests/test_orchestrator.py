@@ -18,7 +18,9 @@ def test_safe_pipeline_is_patched_and_verified(big_csv, tmp_path, cap_mb):
     r = run(os.path.join(FIX, "sum_pipeline.py"), big_csv, cap_mb,
             out_dir=str(tmp_path), echo=quiet)
     assert r.status == "verified", r.log
-    assert r.attempts == 1
+    # Usually 1. It can be 2 or 3 on a machine where the first chunk size fits
+    # only just: the tool then halves the chunks for a safer margin.
+    assert 1 <= r.attempts <= 3
     assert r.before_peak_mb > cap_mb > r.after_peak_mb
     truth = pd.read_csv(big_csv)["depth"]
     assert f"calls={len(truth)} total_depth={truth.sum()}" in r.patched_output
