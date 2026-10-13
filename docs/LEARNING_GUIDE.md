@@ -301,7 +301,7 @@ demo/
   terminal_demo.sh      optional narrated step-by-step walkthrough
   app.py, web/          optional local web page over the same pipeline
 
-tests/                  92 automated tests (see section 13)
+tests/                  94 automated tests (see section 13)
   conftest.py           shared test data, and a memory limit measured on the test machine
   fixtures/             small scripts the tests run
 
@@ -899,8 +899,16 @@ attempts:
 [Verify] peak 116 MB, under the 150 MB cap -> OK
 ```
 
-If the kill happens somewhere else, the old rule applies: that line is a new
-fault and goes back through Gate 2.
+"While reading a chunk" means anywhere inside the chunk loop (`inside_chunk_loop()`
+checks this with the AST), because a sample taken 50 ms later can land on the
+next line. If the kill happens somewhere else, the old rule applies: that line
+is a new fault and goes back through Gate 2.
+
+**Headroom.** Memory varies a few percent from run to run, so a repair that
+only just fits could be killed next time. The full-scale check therefore wants
+the peak at or below **90% of the limit** (`HEADROOM = 0.9`). If it is closer, it
+halves the chunk size and checks again. On the last attempt a tight fit is still
+accepted, with a note that it is close to the limit.
 
 ---
 
@@ -1223,7 +1231,7 @@ Neither adds logic. **The project is the CLI.**
 
 ## 13. The tests
 
-Run all of them with `python3 -m pytest` (92 tests, about 40 s). Add `-v` to see each name.
+Run all of them with `python3 -m pytest` (94 tests, about 50 s). Add `-v` to see each name.
 
 | File | Count | What it proves |
 |---|---|---|
@@ -1233,7 +1241,7 @@ Run all of them with `python3 -m pytest` (92 tests, about 40 s). Add `-v` to see
 | `test_sandbox.py` | 10 | **a patch that sets `CHUNKSIZE` itself is rejected**; good patch verified; **"keeps only the last chunk" bug caught**; missing CHUNKSIZE rejected; TODO rejected; exception; timeout; memory cap; **API key not leaked**; sample/imports helpers |
 | `test_rewriter.py` | 15 | a bad model answer is retryable but `CANNOT_CHUNK` is not; an unreachable local model fails clearly; `auto` picks template / local / Claude correctly; template output **verified by Gate 3**; repeated expression computed once; **rows matching a condition counted correctly**; filter-then-sum refused; unsupported use refused; no loader; already chunked; LLM with fake client: fences stripped, feedback sent, refusal / CANNOT_CHUNK / bad Python, no key; **Claude only called when the template can't** |
 | `test_orchestrator.py` | 7 | full pipeline verified on 1M rows (output = uncapped pandas); median refused, nothing written; module-level refused; no problem under cap; **retry loop stops at exactly 3**; cap can't be raised; splice helpers |
-| `test_hardening.py` | 24 | every problem found in the risk review: printed output is compared; a silent function is not "verified"; unsafe patches are rejected **without running**; averaging chunk averages is caught; gzip and non-UTF-8 data; the sample spans the file; chunk size is halved until it fits; clear reasons (class method, extra arguments, returns the whole table, flat script, limit too low); the backup is never overwritten |
+| `test_hardening.py` | 26 | every problem found in the risk review: printed output is compared; a silent function is not "verified"; unsafe patches are rejected **without running**; averaging chunk averages is caught; gzip and non-UTF-8 data; the sample spans the file; chunk size is halved until it fits; clear reasons (class method, extra arguments, returns the whole table, flat script, limit too low); the backup is never overwritten |
 | `test_interactive.py` | 2 | dragged-in paths (quoted, escaped spaces) are cleaned; chunk size follows row width |
 | `test_script_only.py` | 11 | **the one-command `fix`** repairs and replaces a script, says so if run twice, and leaves an unsafe script untouched; the three ways a script can name its data file are recognised; a script with the path inside is **repaired with no `--data`**; **Gate 3 really uses the sample** (a full read would break a 150 MB cap); a patch that reads a different file is rejected; `--apply` keeps a backup and the script then **survives the same limit that killed it** |
 | `test_end_to_end.py` | 2 | the real demo files through the real CLI |
@@ -1329,6 +1337,13 @@ pandas, loading the same file needs only 130–198 MB, so nothing was ever kille
 and 13 tests failed. The tests now measure the limit on the machine they run on.
 The general lesson: a number measured on one machine is not a constant.
 
+**9. "It passed, so it is fine" was not true on a slower machine.**
+On GitHub's macOS machine a script was repaired and verified at just under the
+limit, then killed when run again: memory varies a few percent between runs.
+The full-scale check now requires headroom (at most 90% of the limit). The same
+machine showed that a kill can be recorded one line after the chunk is read,
+which the tool had treated as a different kind of fault.
+
 The full list of what was tried and fixed is in [RISK_REVIEW.md](RISK_REVIEW.md).
 
 ---
@@ -1407,6 +1422,8 @@ Each phase got its own branch and pull request (PR), and was merged into `main`:
 | #10 | `feature/local-llm` | local LLM rewriter (Ollama), first live LLM runs, retry of bad model answers, the `CHUNKSIZE` gap closed |
 | #11 | `feature/hardening` | risk review of 25 awkward cases: printed output compared, patch vocabulary, compressed and non-UTF-8 data, sample across the file, chunk halving, clearer failures, tests that measure their limit, automatic tests on Linux |
 | #12 | `feature/fix-command` | the one-command form: `tracepatch SCRIPT` (`fix`) |
+| #13 | `docs/panel-prep` | panel preparation: the problem, existing tools, the dataset, likely questions |
+| #14 | `fix/headroom-and-chunk-loop` | headroom under the limit; a kill anywhere in the chunk loop counts as a chunk that is too big |
 
 **CONTRACT.md:** the July version split the work (A: Gates 1 and 2; B: Gate 3 and the LLM).
 On Oct 8 both authors agreed to these changes:
@@ -1703,7 +1720,7 @@ security sandbox; we state that as a limit.
 #### About testing and your work
 
 **Q: How did you test it?**
-92 automated tests: unit tests for each gate, integration tests that pass a
+94 automated tests: unit tests for each gate, integration tests that pass a
 rewrite through Gate 3, and end-to-end tests of the CLI. Plus manual runs on the
 real ClinVar file, checked against plain pandas.
 
@@ -1806,7 +1823,7 @@ The verification idea is the part worth keeping.
 
 ```bash
 pip install -r requirements.txt          # install libraries
-python3 -m pytest                        # all 92 tests
+python3 -m pytest                        # all 94 tests
 
 # One command does everything
 python3 -m tracepatch demo/clinvar_summary.py            # find, repair, verify, replace

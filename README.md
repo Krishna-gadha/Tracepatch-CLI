@@ -170,7 +170,7 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - [x] Data file read from the script itself (path in the call, a top-level constant, or an argument)
 - [x] Demo on real ClinVar data: two scripts verified, median refused
 - [x] Demo on synthetic data: `safe_pipeline.py` verified, `unsafe_pipeline.py` refused
-- [x] Test suite (`python3 -m pytest`): 92 tests passing, run automatically on Linux and macOS
+- [x] Test suite (`python3 -m pytest`): 94 tests passing, run automatically on Linux and macOS
 - [x] Risk review: 25 awkward scripts and data files, none crashes (`docs/RISK_REVIEW.md`)
 - [x] LLM rewriting, run live with a local model (`llama3.2` through Ollama): one script repaired and verified, one wrong repair rejected by Gate 3
 - [ ] `LLMRewriter` (Claude) against the real API: implemented, but only tested with a fake client. **No live Claude call has been made** (needs a paid key).

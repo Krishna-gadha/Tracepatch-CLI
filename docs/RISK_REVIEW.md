@@ -21,7 +21,7 @@ We attacked the tool the way a careful user or examiner would:
   instead of trying smaller chunks;
 - **a backup that could be overwritten**, and several confusing messages.
 
-The test suite grew from 66 to 90 tests. All 25 cases now end in one of four
+The test suite grew from 66 to 94 tests. All 25 cases now end in one of four
 clean outcomes: `VERIFIED`, `REFUSED`, `FAILED` with a reason, or `NO_PROBLEM`.
 None crashes.
 
@@ -100,6 +100,8 @@ This is the most serious kind of failure, because nobody would notice it.
 | 5.2 | The repair passes the sample test but still loads everything. | Handled. | The full-scale check runs the whole repaired script with the tracer attached. | `test_retry_loop_stops_after_three_attempts` |
 | 5.3 | The retry loop never ends. | Handled. | Hard cap of 3 attempts; it cannot be raised. | `test_attempt_cap_cannot_be_raised` |
 | 5.4 | The repaired script is very slow on a huge file. | Vague failure. | Reported as a timeout, with the option to allow more time. | code path in the orchestrator |
+| 5.5 | **The repair fits, but only just.** Memory varies a few percent between runs, so a script verified at just under the limit was killed on a later run (seen on a slower test machine). | Accepted. | The full-scale check wants the peak at or below 90% of the limit. If it is closer, it halves the chunk size and checks again; on the last attempt a tight fit is accepted with a note. | `HEADROOM` in the orchestrator; the automatic macOS runs |
+| 5.6 | The kill is recorded one line after the chunk is read (sampling is every 50 ms), inside the loop body. | Treated as a new fault; misleading message. | Any line inside the chunk loop counts as "a chunk is too big". | `test_a_kill_anywhere_in_the_chunk_loop_counts_as_a_chunk_that_is_too_big` |
 
 ## 6. Rewriting, and the LLM
 
@@ -129,7 +131,8 @@ This is the most serious kind of failure, because nobody would notice it.
 | 8.2 | The user types a wrong path or a non-number. | Handled. | Asked again. | manual runs |
 | 8.3 | Ctrl+C in the middle. | Handled. | Exits cleanly. | manual run |
 | 8.4 | It only works on one operating system. | Tested on macOS only. | The tests now run automatically on Linux and macOS for every change (GitHub Actions). Windows is untested. | `.github/workflows/tests.yml` |
-| 8.5 | **The tests themselves only pass on our laptop.** They used a fixed 200 MB limit; on Linux with a newer pandas the same file needs 130–198 MB, so nothing was killed and 13 tests failed. | Found by the first automatic run. | The tests measure the memory limit on the machine they run on (`tests/conftest.py`). | the Linux runs: 90 passed |
+| 8.5 | **The tests themselves only pass on our laptop.** They used a fixed 200 MB limit; on Linux with a newer pandas the same file needs 130–198 MB, so nothing was killed and 13 tests failed. | Found by the first automatic run. | The tests measure the memory limit on the machine they run on (`tests/conftest.py`). | the Linux and macOS runs: all pass |
+| 8.6 | The tests pass on one run and fail on the next, because memory varies between runs. | Seen on the macOS test machine. | The tests measure the peak twice and keep the lower value, and use a 2,000,000-row file so the gap is much larger than the variation. | two clean runs in a row on all three machines |
 
 ---
 
