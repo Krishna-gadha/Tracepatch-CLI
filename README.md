@@ -225,6 +225,7 @@ tests/        test_gate2.py  test_tracer.py  test_oracle.py  test_sandbox.py  te
               test_interactive.py  test_end_to_end.py  conftest.py  fixtures/
 docs/         LEARNING_GUIDE.md (everything explained from scratch)  DEMO_RUNBOOK.md
               RISK_REVIEW.md (what could go wrong, and what was done about it)
+              PANEL_PREP.md (the problem, existing tools, the dataset, likely questions)
 CONTRACT.md   interface between the two halves of the project
 ```
 
