@@ -39,6 +39,95 @@ Then do **one full practice run** of the demo below, and `restore` afterwards. A
 
 ## The demo (about 10 minutes with the LLM steps)
 
+### Before you touch the terminal: explain it in plain words (2 minutes)
+
+Do not start with the terminal. People who do not write code will be lost in
+ten seconds. Say this first, slowly. No technical words until the end.
+
+**1. A picture everyone understands**
+
+> "Imagine counting the money in a very large bag, on a small table.
+>
+> If you pour the whole bag onto the table, it does not fit. Notes fall on the
+> floor and you have to start again.
+>
+> The sensible way is to take **one handful at a time**, count it, write down the
+> total so far, put it aside, and take the next handful. The table never
+> overflows, and the final total is the same."
+
+**2. Connect it to computers**
+
+> "A computer has the same problem. The bag is a **large data file**. The table
+> is the computer's **memory**, its working space. Many programs pour the whole
+> file into memory at once. When it does not fit, the computer simply **shuts the
+> program down**. It does not say why, and it does not say where."
+
+**3. Who this happens to**
+
+> "This happens to **scientists who analyse large data**. Our example is a
+> hospital genetics lab. They read a patient's DNA and look up what is known
+> about it in a large public table called ClinVar. They write small programs to
+> analyse that table. The table grows every week. One day the program that
+> worked last month is shut down, and they do not know why."
+
+**4. What they do today**
+
+> "Today they have three choices. Ask for a **bigger computer** and try again,
+> which costs time and money and fails again when the table grows. **Rewrite the
+> program by hand**, which is slow. Or **ask an AI chatbot** to rewrite it, and
+> hope the new program still gives the right answer. Nothing checks that."
+
+**5. The catch**
+
+> "And here is the danger. 'One handful at a time' works for a **total**. It does
+> **not** work for everything. If I ask for the **middle value** of all the notes,
+> I cannot find it handful by handful. A program rewritten that way gives a
+> **wrong answer, with no warning**. That is worse than a program that stops."
+
+**6. What we built**
+
+> "TracePatch does four things with one command. It **finds the exact line**
+> where the program ran out of memory. It **checks whether the calculation is
+> safe** to do one handful at a time. It **rewrites the program**. And it
+> **proves** the new program gives the same answer and fits in memory. If the
+> calculation is not safe, like the middle value, it **refuses and says what to
+> do instead**. It never gives a wrong answer to look helpful."
+
+**7. The benefit, in one line**
+
+> "The scientist gets a program that works on the same computer, with the same
+> answer, in seconds, instead of days of trial and error."
+
+Then say: *"Let me show you."* Only now open the terminal.
+
+**While the demo runs, point at only three things.** Ignore the rest of the text.
+
+| Point at | Say |
+|---|---|
+| `KILLED ... fault at line 15` | "The program was shut down. We found the line." |
+| `VERIFIED PATCH` | "It was repaired, and the repair was checked." |
+| `memory before ... / memory after ...` | "It needed more than 500. Now it needs 180. Same answer." |
+
+**If they ask "is this used in the real world?"**
+
+> "Not yet. This is a working prototype. The problem is real: the standard tools
+> scientists use on shared computers have a built-in 'try again with more
+> memory' feature, because this happens so often. We show a way to fix the
+> program instead, and to check the fix."
+
+**If they ask "does it only work on this one dataset?"** Show a different one:
+
+```bash
+python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv
+```
+
+> "A different file and a different program: 4 million rows, different columns.
+> It works on any table file, as long as the calculation is one it knows is safe."
+
+**Who writes the repair?** For the main demo, TracePatch's own built-in rules,
+with no AI. The screen says `template rewriter`. Only in steps 9 and 10 does the
+AI model write it, and the screen says `local LLM (llama3.2)`.
+
 ### The short version: one command
 
 If there is little time, this single command shows everything: it finds the
@@ -53,25 +142,14 @@ Afterwards: `python3 -m tracepatch restore demo/clinvar_summary.py`
 
 The steps below show the same thing more slowly, with the before and after.
 
-### 1. Set the scene (1 minute)
+### 1. Set the scene (only if you skipped the plain-words opening)
 
 > "A genetics lab looks up each patient's DNA variants in ClinVar, the public
-> database of what other labs found. The lab keeps a local copy of that table,
-> and a bioinformatician has a small Python script that checks and summarises
-> each new copy.
->
-> The script does not run on a laptop. It is submitted as a job to a shared
-> computing cluster, with a fixed memory limit. The table keeps growing. One day
-> the script needs more memory than the job was given, and the cluster kills it.
-> The log says only 'killed': no error, no line number.
->
-> Today, people ask for more memory and submit again, or rewrite the script by
-> hand and hope the answer is still right. TracePatch finds the line, repairs the
-> script to read the table in pieces, and accepts the repair only after proving
-> the answer is unchanged and the memory fits."
-
-Say plainly that this is a typical scenario from how such clusters and tools are
-documented to work, not a study of a particular lab.
+> database of what other labs found. A bioinformatician's script checks each new
+> copy of that table. The script runs as a job on a shared cluster with a fixed
+> memory limit. The table keeps growing; one day the cluster kills the job, with
+> no error and no line number. TracePatch finds the line, repairs the script, and
+> proves the repair."
 
 ### 2. The script and its data
 

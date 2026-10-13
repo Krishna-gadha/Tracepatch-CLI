@@ -28,6 +28,18 @@ What can go wrong is in [RISK_REVIEW.md](RISK_REVIEW.md). What to type is in
 
 **One sentence:** *verified automatic repair of out-of-memory crashes in data scripts.*
 
+### The same thing for someone who does not write code
+
+Counting the money in a very large bag on a small table: pour it all out and it
+falls off the table. Take one handful at a time, keep a running total, and the
+table never overflows. The bag is a large data file; the table is the computer's
+memory. Programs that pour the whole file into memory get shut down by the
+computer, with no explanation. "One handful at a time" gives the right total,
+but not the right middle value. TracePatch finds where the program overflowed,
+rewrites it to work one handful at a time when that is safe, proves the answer
+is unchanged, and refuses when it is not safe. The full spoken version is at the
+top of the demo runbook.
+
 ---
 
 ## 2. The world this lives in
