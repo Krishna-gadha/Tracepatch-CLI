@@ -267,6 +267,7 @@ The July contract used a blocklist. We switched to an allowlist, because a wrong
 README.md               project overview, quick start, status checklist
 CLAUDE.md               rules for the AI assistant working on this repo
 CONTRACT.md             agreed interface between the two halves of the project
+pyproject.toml          makes TracePatch an installable package with a `tracepatch` command
 requirements.txt        libraries: psutil, numpy, pandas, pytest, flask, anthropic (optional)
 pytest.ini              tells pytest where tests are and lets them import `tracepatch`
 .gitignore              keeps data files (*.csv, *.tsv), secrets (.env) and outputs out of git
@@ -283,6 +284,7 @@ tracepatch/             the tool itself (a Python package)
   _trace_child.py       Gate 1, child side: runs the script + samples line/RSS
   gate2_ast.py          Gate 2: allowlist AST check
   rewriter.py           Rewriter interface; template, Claude and local-LLM rewriters
+  doctor.py             `tracepatch doctor`: checks the libraries and the AI model
   gate3_sandbox.py      Gate 3, parent side: runs functions in a sandbox
   _sandbox_child.py     Gate 3, child side: executes one function, returns JSON
   gate3_oracle.py       Gate 3: compares two results with tolerance
@@ -301,7 +303,7 @@ demo/
   terminal_demo.sh      optional narrated step-by-step walkthrough
   app.py, web/          optional local web page over the same pipeline
 
-tests/                  94 automated tests (see section 13)
+tests/                  98 automated tests (see section 13)
   conftest.py           shared test data, and a memory limit measured on the test machine
   fixtures/             small scripts the tests run
 
@@ -447,6 +449,25 @@ line gives a clean refusal:
 {"safe": False, "reason": "non-decomposable op: median() at line 17", "source_segment": None}
 {"safe": False, "reason": "crash is at module level (line 4 is not inside a function); TracePatch only rewrites code inside a function", "source_segment": None}
 ```
+
+### A refusal comes with advice
+
+Refusing is safe, but on its own it is not helpful. So each refused operation
+has a short suggestion (`ADVICE` in `gate2_ast.py`), printed under the refusal:
+
+```
+REFUSED: non-decomposable op: median() at line 15; nothing was rewritten
+  What you can do: A median needs every value at once, so it cannot be merged from pieces.
+  If the script needs only a few columns, load just those: read_csv(..., usecols=[...]).
+```
+
+This **changes no decision**: the operation is still refused. Two of the
+suggestions were checked on the real ClinVar file:
+
+| Refused | Advice | Result of following it |
+|---|---|---|
+| `df[col].median()` | load only that column with `usecols` | runs in 107 MB instead of being killed at 500 MB; same answer (3.0) |
+| `df[col].mean()` | write it as `df[col].sum() / df[col].count()` | TracePatch repairs that form; verified, same answer |
 
 ### The three bugs fixed in Phase 0
 
@@ -923,6 +944,18 @@ accepted, with a note that it is close to the limit.
 | `python3 -m tracepatch run SCRIPT` | the same steps with every option; replaces the script only with `--apply` |
 | `python3 -m tracepatch limit SCRIPT` | only run SCRIPT under a memory limit (no repair) |
 | `python3 -m tracepatch restore SCRIPT` | undo: bring back `SCRIPT.orig` |
+| `python3 -m tracepatch doctor` | check that the libraries and the AI model are ready, with the fix for anything missing |
+
+**It is a package.** `pyproject.toml` describes it, so `pip install .` installs
+TracePatch and adds a `tracepatch` command (`tracepatch script.py` is then the
+same as `python3 -m tracepatch script.py`). The required libraries (pandas,
+numpy, psutil) are installed with it.
+
+**The AI model is not inside the package**, because a model is about 2 GB and a
+package is a few MB. This is how such tools normally work: the model is
+installed once (`ollama pull llama3.2`) and found at run time. `tracepatch doctor`
+(`doctor.py`) checks Python, the libraries, whether Ollama is running and whether
+the model is installed, and prints the exact command for anything missing.
 
 **`fix` is `run` with the choices already made.** `cli.fix()` calls
 `orchestrator.run(..., rewriter="auto", apply=True)`: the offline template first,
@@ -1231,11 +1264,12 @@ Neither adds logic. **The project is the CLI.**
 
 ## 13. The tests
 
-Run all of them with `python3 -m pytest` (94 tests, about 50 s). Add `-v` to see each name.
+Run all of them with `python3 -m pytest` (98 tests, about 50 s). Add `-v` to see each name.
 
 | File | Count | What it proves |
 |---|---|---|
-| `test_gate2.py` | 7 | safe function accepted; `median` refused; bare `sorted()` refused; unknown method and unknown bare name refused; module-level crash refused (not raised); contract shape |
+| `test_doctor.py` | 2 | `doctor` reports ready when the model is installed, and says how to get it when it is not |
+| `test_gate2.py` | 9 | a refusal carries advice (median → load fewer columns; mean → sum ÷ count); safe function accepted; `median` refused; bare `sorted()` refused; unknown method and unknown bare name refused; module-level crash refused (not raised); contract shape |
 | `test_tracer.py` | 4 | memory hog killed at the right line and function (exit 137); small script not flagged; normal exception not called OOM; no in-script sample → line `None` |
 | `test_oracle.py` | 10 | **float reordering accepted** although `!=`; chunked sum of 100k random numbers accepted; real difference rejected; int vs float; strings exact; length mismatch; type mismatch; NaN = NaN; DataFrames; tuples |
 | `test_sandbox.py` | 10 | **a patch that sets `CHUNKSIZE` itself is rejected**; good patch verified; **"keeps only the last chunk" bug caught**; missing CHUNKSIZE rejected; TODO rejected; exception; timeout; memory cap; **API key not leaked**; sample/imports helpers |
@@ -1424,6 +1458,7 @@ Each phase got its own branch and pull request (PR), and was merged into `main`:
 | #12 | `feature/fix-command` | the one-command form: `tracepatch SCRIPT` (`fix`) |
 | #13 | `docs/panel-prep` | panel preparation: the problem, existing tools, the dataset, likely questions |
 | #14 | `fix/headroom-and-chunk-loop` | headroom under the limit; a kill anywhere in the chunk loop counts as a chunk that is too big |
+| #15 | `feature/package-and-advice` | installable package (`pip install .`), `doctor`, advice with every refusal |
 
 **CONTRACT.md:** the July version split the work (A: Gates 1 and 2; B: Gate 3 and the LLM).
 On Oct 8 both authors agreed to these changes:
@@ -1720,7 +1755,7 @@ security sandbox; we state that as a limit.
 #### About testing and your work
 
 **Q: How did you test it?**
-94 automated tests: unit tests for each gate, integration tests that pass a
+98 automated tests: unit tests for each gate, integration tests that pass a
 rewrite through Gate 3, and end-to-end tests of the CLI. Plus manual runs on the
 real ClinVar file, checked against plain pandas.
 
@@ -1823,7 +1858,8 @@ The verification idea is the part worth keeping.
 
 ```bash
 pip install -r requirements.txt          # install libraries
-python3 -m pytest                        # all 94 tests
+python3 -m pytest                        # all 98 tests
+python3 -m tracepatch doctor             # is everything, including the AI model, ready?
 
 # One command does everything
 python3 -m tracepatch demo/clinvar_summary.py            # find, repair, verify, replace

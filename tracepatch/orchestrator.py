@@ -195,6 +195,8 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                     if "module level" in g2["reason"]:
                         hint = ("\n  Put the loading and the calculation inside a function "
                                 "(for example `def main():`) and call it")
+                    for tip in g2.get("advice", [])[:3]:
+                        hint += f"\n  What you can do: {tip}"
                     return finish("refused", f"{g2['reason']}; nothing was rewritten{hint}")
                 func_name, segment = g2["function_name"], g2["source_segment"]
                 say(f"[Gate 2] {func_name}(): every call is on the chunk-safe allowlist -> OK")

@@ -310,7 +310,7 @@ is a working prototype of a method.
 | It saves memory | 678 MB → about 180 MB on the ClinVar file |
 | It refuses unsafe cases | Live: the median script |
 | It verifies AI-written code | Live: one model rewrite verified, one rejected |
-| It is tested | 94 automated tests, run automatically on Linux and macOS |
+| It is tested | 98 automated tests, run automatically on Linux and macOS |
 | We tried to break it | 25 awkward cases; none crashes (RISK_REVIEW.md) |
 
 ---
@@ -390,7 +390,16 @@ only, with pandas. Windows is untested.
 
 **Q: Is refusing not a weakness?**
 It is the design. A tool that guesses gives silent wrong answers. Ours says
-which operation it could not handle and on which line.
+which operation it could not handle, on which line, and what to do instead. For
+a median it suggests loading only the needed column; we checked that on ClinVar
+and it runs in 107 MB instead of being killed. For a mean it suggests writing it
+as a sum divided by a count, which TracePatch can then repair.
+
+**Q: Is the AI model part of your tool?**
+TracePatch installs as one package (`pip install .`). The model is not inside it,
+because a model is about 2 GB; it is installed once through Ollama and found at
+run time. `tracepatch doctor` checks that it is there. Without it, TracePatch
+still does every repair its built-in rules cover.
 
 **Q: Is anyone using it?**
 No. It is a prototype. The next step would be to try it on real scripts from a
@@ -407,7 +416,7 @@ prints instead of returning was "verified" with nothing compared; equal-sized
 test chunks hid a wrong formula. We found these by attacking our own tool.
 
 **Q: How do you know your own tool works?**
-94 automated tests, run automatically on Linux and macOS for every change, and
+98 automated tests, run automatically on Linux and macOS for every change, and
 a risk review of 25 awkward cases.
 
 ---

@@ -21,7 +21,7 @@ We attacked the tool the way a careful user or examiner would:
   instead of trying smaller chunks;
 - **a backup that could be overwritten**, and several confusing messages.
 
-The test suite grew from 66 to 94 tests. All 25 cases now end in one of four
+The test suite grew from 66 to 98 tests. All 25 cases now end in one of four
 clean outcomes: `VERIFIED`, `REFUSED`, `FAILED` with a reason, or `NO_PROBLEM`.
 None crashes.
 
@@ -53,6 +53,7 @@ This is the most serious kind of failure, because nobody would notice it.
 | 1.8 | Float results differ in the last digits because additions are reordered, and a correct patch is rejected. | Handled. | Unchanged: tolerance comparison (`rtol=1e-5`, `atol=1e-8`). | `test_float_reordering_accepted_although_not_exactly_equal` |
 | 1.9 | The rewrite reads a different file than the original. | Not checked. | Rejected: "does not read the data file that the original reads". | `test_patch_reading_a_different_file_is_rejected` |
 | 1.10 | `len(df)` came back as a numpy integer instead of a plain integer, so it printed differently inside a tuple. | Value right, type changed. | The template keeps it a plain `int`. | `test_template_keeps_len_as_a_plain_int` |
+| 1.11 | A refusal leaves the person with nothing to do next. | Refused, with no guidance. | Every refusal now carries advice: for a median, load only the needed column (checked: 107 MB, same answer); for a mean, write it as sum ÷ count, which TracePatch repairs. The decision itself is unchanged. | `test_refusal_comes_with_advice`, `test_mean_is_refused_with_the_form_that_can_be_repaired` |
 
 ## 2. Data files
 
@@ -133,6 +134,7 @@ This is the most serious kind of failure, because nobody would notice it.
 | 8.4 | It only works on one operating system. | Tested on macOS only. | The tests now run automatically on Linux and macOS for every change (GitHub Actions). Windows is untested. | `.github/workflows/tests.yml` |
 | 8.5 | **The tests themselves only pass on our laptop.** They used a fixed 200 MB limit; on Linux with a newer pandas the same file needs 130–198 MB, so nothing was killed and 13 tests failed. | Found by the first automatic run. | The tests measure the memory limit on the machine they run on (`tests/conftest.py`). | the Linux and macOS runs: all pass |
 | 8.6 | The tests pass on one run and fail on the next, because memory varies between runs. | Seen on the macOS test machine. | The tests measure the peak twice and keep the lower value, and use a 2,000,000-row file so the gap is much larger than the variation. | two clean runs in a row on all three machines |
+| 8.7 | Someone installs it and the AI model is missing, with no idea why repairs fail. | A hint only when a repair failed. | `tracepatch doctor` checks the libraries, Ollama and the model, and prints the exact fix. | `test_doctor_says_how_to_get_the_model` |
 
 ---
 

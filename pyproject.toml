@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tracepatch"
+version = "0.1.0"
+description = "Verified repair of out-of-memory crashes in pandas data scripts"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Krishnagadha S P" }, { name = "Nandana Sankar" }]
+dependencies = ["psutil", "numpy", "pandas"]
+
+[project.optional-dependencies]
+claude = ["anthropic"]   # only for the Claude rewriter
+web = ["flask"]          # only for the optional web page (demo/app.py)
+dev = ["pytest"]
+
+[project.scripts]
+# After `pip install .` the command is simply:  tracepatch your_script.py
+tracepatch = "tracepatch.cli:main"
+
+[tool.setuptools]
+packages = ["tracepatch"]

@@ -25,7 +25,7 @@ applied the repair; undo it with `python3 -m tracepatch restore demo/clinvar_sum
 ```bash
 python3 -m pytest
 ```
-Must end with `94 passed`.
+Must end with `98 passed`.
 
 ```bash
 ollama list
@@ -153,7 +153,9 @@ python3 -m tracepatch run demo/clinvar_median.py
 
 > "This computes a median. The median of the pieces is not the median of the whole
 > file, so chunking would give a wrong answer with no error. Gate 2 refuses, and
-> nothing is changed. Line 14 is where memory blew up; line 15 is why it can't be fixed."
+> nothing is changed. Line 14 is where memory blew up; line 15 is why it can't be fixed.
+> And it tells the person what to do instead: load only the column the median needs.
+> We checked that: it runs in 107 MB with the same answer."
 
 ### 7. The tests
 
@@ -161,7 +163,7 @@ python3 -m tracepatch run demo/clinvar_median.py
 python3 -m pytest
 ```
 
-> "94 automated tests. They cover every gate, a patch with a deliberate bug that
+> "98 automated tests. They cover every gate, a patch with a deliberate bug that
 > Gate 3 must catch, the retry loop stopping after three attempts, and every
 > problem we found when we attacked our own tool. They also run automatically on
 > Linux for every change."
@@ -185,9 +187,9 @@ offline template cannot handle a function.
 menu bar; if it is not there, open the Ollama app):
 
 ```bash
-ollama list
+python3 -m tracepatch doctor
 ```
-It must list `llama3.2`.
+It must end with `Ready.` and show `model llama3.2 is installed`.
 
 ### 9. An LLM-written repair that is verified
 
@@ -235,7 +237,7 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 | Number tolerance | relative 1e-5, absolute 1e-8 |
 | Retry cap | 3 attempts |
 | Allowlist | 8 methods + 6 builtins |
-| Tests | 94 |
+| Tests | 98 |
 | Awkward cases tried in the risk review | 25, none crashes |
 | LLM | `llama3.2` (3 billion parameters, 2 GB), local through Ollama |
 | Exit codes | 0 verified, 2 refused, 1 failed, 137 killed by `limit` |
