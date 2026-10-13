@@ -6,7 +6,8 @@ it. Every section names the file it is about.
 
 For the review itself, use the short **[demo runbook](DEMO_RUNBOOK.md)**: what to
 type and what to say, in order. Everything that could go wrong, and what was
-done about it, is in the **[risk review](RISK_REVIEW.md)**.
+done about it, is in the **[risk review](RISK_REVIEW.md)**. The story, the competitors, the
+dataset and the questions a panel will ask are in **[panel preparation](PANEL_PREP.md)**.
 
 **Contents**
 
@@ -307,6 +308,7 @@ tests/                  92 automated tests (see section 13)
 docs/LEARNING_GUIDE.md  this file
 docs/DEMO_RUNBOOK.md    what to type and say in the review, in order
 docs/RISK_REVIEW.md     what could go wrong, and what was done about each thing
+docs/PANEL_PREP.md      the problem, who has it, what exists already, the dataset, panel questions
 .github/workflows/      runs the tests automatically on Linux and macOS
 ```
 
