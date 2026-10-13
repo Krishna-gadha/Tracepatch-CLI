@@ -197,6 +197,27 @@ fix by running the program's **tests**.
 and the new version on the same sample and compare. This is called
 **differential testing**.
 
+### F. Automatic crash repair for apps
+
+**Baidu's stability-analysis-agent** (open source) has the same overall shape as
+our project: collect evidence, fix the code, verify the fix. It works on
+**applications** (Android, iOS, desktop; mostly C/C++). It starts from the
+**crash log** an app leaves behind, uses an AI model to write the fix, and
+checks it by building the app and running its tests.
+
+**How we differ:**
+- **Field:** it repairs apps; we repair Python data scripts. Its page does not
+  mention pandas or data scripts.
+- **Starting point:** an app crash leaves a log. A script killed for memory
+  leaves nothing, so we have to record the line ourselves (Gate 1).
+- **Checking the fix:** apps have tests. Analysis scripts usually do not, so we
+  compare against the original script on a sample, and measure memory.
+- **Refusing:** we check first whether the calculation can be chunked at all,
+  and refuse by default.
+
+It is useful to cite as related work: the idea "evidence, then fix, then verify"
+is being applied in industry, in a different field.
+
 ### The comparison in one table
 
 | | Finds the line after a kill | Repairs the script | Checks the answer is unchanged | Checks memory on the full file | Refuses unsafe cases |
@@ -356,6 +377,19 @@ For new work, that is good advice. But existing scripts would have to be
 rewritten, and nothing confirms the rewritten script gives the same result.
 TracePatch keeps the script in pandas and verifies the change.
 
+**Q: Why a 500 MB limit? Is that per chunk?**
+No. It is the limit for the whole program, and it is a number chosen for the
+demo: our file needs 678 MB loaded all at once, so 500 MB makes the problem
+appear on a small file in seconds. It stands in for the memory share a cluster
+gives one job, which is typically several GB. The tool takes any limit, for
+example `--mem-limit-mb 16000` for 16 GB.
+
+**Q: Tools like Baidu's stability-analysis-agent already fix crashes with AI. How are you different?**
+Same idea, different field. It repairs apps from their crash logs and checks the
+fix with the app's tests. We repair data scripts, where a memory kill leaves no
+log and there are usually no tests, so we record the line ourselves and check
+the fix against the original script.
+
 **Q: Why not just give it more memory?**
 It works until the table grows again, it has a ceiling, it costs queue time,
 and the script stays broken.
@@ -483,3 +517,4 @@ a risk review of 25 awkward cases.
 - pandas, "Scaling to large datasets": https://pandas.pydata.org/docs/user_guide/scale.html
 - Scalene profiler: https://pypi.org/project/scalene/
 - Fil profiler: https://pythonspeed.com/fil/docs
+- Baidu stability-analysis-agent: https://github.com/baidu-maps/stability-analysis-agent
