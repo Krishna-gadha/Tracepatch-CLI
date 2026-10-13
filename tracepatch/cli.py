@@ -1,7 +1,9 @@
 """Command line entry point.
 
+  python -m tracepatch fix SCRIPT                   ONE command: find, repair, verify, replace
+  python -m tracepatch SCRIPT                       the same (shortcut)
   python -m tracepatch                              interactive mode: asks for the script
-  python -m tracepatch run SCRIPT                   find, repair and verify
+  python -m tracepatch run SCRIPT                   the same steps, with every option exposed
   python -m tracepatch limit SCRIPT                 just run SCRIPT under a memory limit
   python -m tracepatch restore SCRIPT               undo --apply (bring back SCRIPT.orig)
 
@@ -36,15 +38,49 @@ def limit(script: str, script_args, mem_limit_mb: float) -> int:
     return result.returncode
 
 
+COMMANDS = ("fix", "run", "limit", "restore")
+
+
+def fix(script: str, data, mem_limit_mb: float) -> int:
+    """Everything in one go: find the crash, repair it (the offline template
+    first, an LLM only if needed), verify the repair, and replace the script.
+    The original is kept as SCRIPT.orig, so `restore` can undo it."""
+    from tracepatch.interactive import show_diff
+
+    report = run(script, data, mem_limit_mb, rewriter="auto", apply=True)
+    name = os.path.relpath(script)
+    if report.status == "verified":
+        print("\nWhat was changed:\n")
+        show_diff(report.diff_path)
+        print(f"\nDone. {name} is repaired and verified.")
+        print(f"The original is saved as {os.path.basename(script)}.orig. "
+              f"To undo: python3 -m tracepatch restore {name}")
+    elif report.status == "no_problem" and os.path.isfile(script + ".orig"):
+        print(f"({name} was already repaired earlier. To undo: python3 -m tracepatch restore {name})")
+    else:
+        print(f"\n{name} was not changed.")
+    return report.exit_code
+
+
 def main(argv=None) -> int:
-    if not (sys.argv[1:] if argv is None else argv):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
         from tracepatch.interactive import main as interactive_main
         return interactive_main()
+    # Shortcut: `tracepatch script.py` means `tracepatch fix script.py`.
+    if argv[0] not in COMMANDS and argv[0].endswith(".py"):
+        argv.insert(0, "fix")
     p = argparse.ArgumentParser(prog="tracepatch",
                                 description="Find and repair OOM crashes in pandas scripts, "
                                             "accepting a patch only after verifying it.")
     sub = p.add_subparsers(dest="command", required=True)
-    r = sub.add_parser("run", help="trace, check, rewrite and verify a script")
+    f = sub.add_parser("fix", help="one command: find, repair, verify and replace the script")
+    f.add_argument("script", help="the analysis script to repair")
+    f.add_argument("--data", default=None,
+                   help="the input file, only if the script takes it as argv[1]")
+    f.add_argument("--mem-limit-mb", type=float, default=DEFAULT_CAP_MB,
+                   help=f"the memory limit the script must fit in (default {DEFAULT_CAP_MB})")
+    r = sub.add_parser("run", help="the same steps, with every option exposed")
     r.add_argument("script", help="the analysis script to repair")
     r.add_argument("--data", default=None,
                    help="the input file, only if the script takes it as argv[1]; "
@@ -74,6 +110,8 @@ def main(argv=None) -> int:
     u.add_argument("script")
     a = p.parse_args(argv)
 
+    if a.command == "fix":
+        return fix(a.script, a.data, a.mem_limit_mb)
     if a.command == "limit":
         return limit(a.script, a.script_args, a.mem_limit_mb)
     if a.command == "restore":
