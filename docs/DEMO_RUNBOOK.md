@@ -25,7 +25,7 @@ applied the repair; undo it with `python3 -m tracepatch restore demo/clinvar_sum
 ```bash
 python3 -m pytest
 ```
-Must end with `90 passed`.
+Must end with `92 passed`.
 
 ```bash
 ollama list
@@ -38,6 +38,20 @@ Then do **one full practice run** of the demo below, and `restore` afterwards. A
 - keep this file open on the side.
 
 ## The demo (about 10 minutes with the LLM steps)
+
+### The short version: one command
+
+If there is little time, this single command shows everything: it finds the
+crash, repairs the script, verifies the repair, replaces the script and prints
+what it changed.
+
+```bash
+python3 -m tracepatch demo/clinvar_summary.py
+```
+
+Afterwards: `python3 -m tracepatch restore demo/clinvar_summary.py`
+
+The steps below show the same thing more slowly, with the before and after.
 
 ### 1. Set the scene (1 minute)
 
@@ -147,7 +161,7 @@ python3 -m tracepatch run demo/clinvar_median.py
 python3 -m pytest
 ```
 
-> "90 automated tests. They cover every gate, a patch with a deliberate bug that
+> "92 automated tests. They cover every gate, a patch with a deliberate bug that
 > Gate 3 must catch, the retry loop stopping after three attempts, and every
 > problem we found when we attacked our own tool. They also run automatically on
 > Linux for every change."
@@ -221,7 +235,7 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 | Number tolerance | relative 1e-5, absolute 1e-8 |
 | Retry cap | 3 attempts |
 | Allowlist | 8 methods + 6 builtins |
-| Tests | 90 |
+| Tests | 92 |
 | Awkward cases tried in the risk review | 25, none crashes |
 | LLM | `llama3.2` (3 billion parameters, 2 GB), local through Ollama |
 | Exit codes | 0 verified, 2 refused, 1 failed, 137 killed by `limit` |
@@ -235,7 +249,7 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 | `NO_PROBLEM: ... stayed under the cap` | The script is already repaired. Run `python3 -m tracepatch restore demo/clinvar_summary.py` |
 | `limit` finishes instead of being killed | Same cause: `restore` the script |
 | The Rewrite line says `template rewriter could not rewrite` in steps 9–10 | Ollama is not running: open the Ollama app, check `ollama list`, and run again |
-| Interactive mode misbehaves | Use one command: `python3 -m tracepatch run demo/clinvar_summary.py` |
+| Interactive mode misbehaves | Use the one command: `python3 -m tracepatch demo/clinvar_summary.py` |
 | `clinvar.tsv` is missing or broken | Use the synthetic data: `python3 demo/make_data.py`, then `python3 -m tracepatch run demo/safe_pipeline.py --data demo/big.csv` and the same with `demo/unsafe_pipeline.py` |
 | A run fails unexpectedly | Run it once more (memory readings vary a little), then use the synthetic data |
 

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tracepatch.cli import limit
+from tracepatch.cli import limit, main
 from tracepatch.dataref import find_data_ref, replace_literal_path
 from tracepatch.gate3_sandbox import extract_imports, verify_patch
 from tracepatch.orchestrator import auto_chunk_rows, run
@@ -122,3 +122,38 @@ def test_missing_data_argument_is_explained(tmp_path):
 def test_auto_chunk_rows_follows_row_width():
     assert auto_chunk_rows(204_000_000, 300_000) == 25_000     # wide ClinVar rows
     assert auto_chunk_rows(116_000_000, 4_000_000) == 100_000   # narrow rows: capped
+
+
+def test_one_command_fix_repairs_and_replaces(big_csv, tmp_path, cap_mb, capsys, monkeypatch):
+    import tracepatch.rewriter as rw
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(rw, "local_llm_available", lambda: False)  # template only: no LLM needed here
+    monkeypatch.chdir(tmp_path)
+    script = tmp_path / "analysis.py"
+    original = GLOBAL_STYLE.format(path=big_csv)
+    script.write_text(original)
+
+    # `tracepatch analysis.py` is the shortcut for `tracepatch fix analysis.py`
+    assert main([str(script), "--mem-limit-mb", str(cap_mb)]) == 0
+    out = capsys.readouterr().out
+    assert "VERIFIED PATCH" in out and "What was changed" in out and "Done." in out
+    assert "chunksize=CHUNKSIZE" in script.read_text()
+    assert (tmp_path / "analysis.py.orig").read_text() == original
+
+    # Running it again changes nothing and says why.
+    assert main(["fix", str(script), "--mem-limit-mb", str(cap_mb)]) == 0
+    assert "already repaired" in capsys.readouterr().out
+
+    assert main(["restore", str(script)]) == 0
+    assert script.read_text() == original
+
+
+def test_one_command_fix_leaves_an_unsafe_script_alone(big_csv, tmp_path, cap_mb, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    script = tmp_path / "median.py"
+    source = (f'import pandas as pd\n\nDATA = {big_csv!r}\n\n\ndef middle():\n'
+              '    df = pd.read_csv(DATA)\n    return df["depth"].median()\n\n\nprint(middle())\n')
+    script.write_text(source)
+    assert main(["fix", str(script), "--mem-limit-mb", str(cap_mb)]) == 2
+    assert "was not changed" in capsys.readouterr().out
+    assert script.read_text() == source and not (tmp_path / "median.py.orig").exists()

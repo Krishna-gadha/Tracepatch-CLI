@@ -300,7 +300,7 @@ demo/
   terminal_demo.sh      optional narrated step-by-step walkthrough
   app.py, web/          optional local web page over the same pipeline
 
-tests/                  90 automated tests (see section 13)
+tests/                  92 automated tests (see section 13)
   conftest.py           shared test data, and a memory limit measured on the test machine
   fixtures/             small scripts the tests run
 
@@ -908,10 +908,18 @@ fault and goes back through Gate 2.
 
 | Command | What it does |
 |---|---|
-| `python3 -m tracepatch` | interactive mode: asks for the script, then repairs it |
-| `python3 -m tracepatch run SCRIPT` | find, repair and verify in one command |
+| `python3 -m tracepatch SCRIPT` | **one command**: find, repair, verify and replace the script. Short for `fix SCRIPT` |
+| `python3 -m tracepatch` | interactive mode: asks for the script, then does the same |
+| `python3 -m tracepatch run SCRIPT` | the same steps with every option; replaces the script only with `--apply` |
 | `python3 -m tracepatch limit SCRIPT` | only run SCRIPT under a memory limit (no repair) |
-| `python3 -m tracepatch restore SCRIPT` | undo `--apply` (bring back `SCRIPT.orig`) |
+| `python3 -m tracepatch restore SCRIPT` | undo: bring back `SCRIPT.orig` |
+
+**`fix` is `run` with the choices already made.** `cli.fix()` calls
+`orchestrator.run(..., rewriter="auto", apply=True)`: the offline template first,
+an LLM only if the template cannot handle the function, and the script is
+replaced only after every check has passed. It then prints the diff and how to
+undo. If the script is refused or fails, it prints "was not changed". Nothing
+about the gates is different; it is the same pipeline with fewer things to type.
 
 ### 11.1 `limit`: what the user sees without TracePatch
 
@@ -1213,7 +1221,7 @@ Neither adds logic. **The project is the CLI.**
 
 ## 13. The tests
 
-Run all of them with `python3 -m pytest` (90 tests, about 35 s). Add `-v` to see each name.
+Run all of them with `python3 -m pytest` (92 tests, about 40 s). Add `-v` to see each name.
 
 | File | Count | What it proves |
 |---|---|---|
@@ -1225,7 +1233,7 @@ Run all of them with `python3 -m pytest` (90 tests, about 35 s). Add `-v` to see
 | `test_orchestrator.py` | 7 | full pipeline verified on 1M rows (output = uncapped pandas); median refused, nothing written; module-level refused; no problem under cap; **retry loop stops at exactly 3**; cap can't be raised; splice helpers |
 | `test_hardening.py` | 24 | every problem found in the risk review: printed output is compared; a silent function is not "verified"; unsafe patches are rejected **without running**; averaging chunk averages is caught; gzip and non-UTF-8 data; the sample spans the file; chunk size is halved until it fits; clear reasons (class method, extra arguments, returns the whole table, flat script, limit too low); the backup is never overwritten |
 | `test_interactive.py` | 2 | dragged-in paths (quoted, escaped spaces) are cleaned; chunk size follows row width |
-| `test_script_only.py` | 9 | the three ways a script can name its data file are recognised; a script with the path inside is **repaired with no `--data`**; **Gate 3 really uses the sample** (a full read would break a 150 MB cap); a patch that reads a different file is rejected; `--apply` keeps a backup and the script then **survives the same limit that killed it** |
+| `test_script_only.py` | 11 | **the one-command `fix`** repairs and replaces a script, says so if run twice, and leaves an unsafe script untouched; the three ways a script can name its data file are recognised; a script with the path inside is **repaired with no `--data`**; **Gate 3 really uses the sample** (a full read would break a 150 MB cap); a patch that reads a different file is rejected; `--apply` keeps a backup and the script then **survives the same limit that killed it** |
 | `test_end_to_end.py` | 2 | the real demo files through the real CLI |
 
 Three kinds of test: **unit** (one function, e.g. the oracle), **integration**
@@ -1396,6 +1404,7 @@ Each phase got its own branch and pull request (PR), and was merged into `main`:
 | #9 | `feature/script-only-flow` | data file read from the script itself, automatic chunk size, `limit`, `--apply` and `restore` |
 | #10 | `feature/local-llm` | local LLM rewriter (Ollama), first live LLM runs, retry of bad model answers, the `CHUNKSIZE` gap closed |
 | #11 | `feature/hardening` | risk review of 25 awkward cases: printed output compared, patch vocabulary, compressed and non-UTF-8 data, sample across the file, chunk halving, clearer failures, tests that measure their limit, automatic tests on Linux |
+| #12 | `feature/fix-command` | the one-command form: `tracepatch SCRIPT` (`fix`) |
 
 **CONTRACT.md:** the July version split the work (A: Gates 1 and 2; B: Gate 3 and the LLM).
 On Oct 8 both authors agreed to these changes:
@@ -1692,7 +1701,7 @@ security sandbox; we state that as a limit.
 #### About testing and your work
 
 **Q: How did you test it?**
-90 automated tests: unit tests for each gate, integration tests that pass a
+92 automated tests: unit tests for each gate, integration tests that pass a
 rewrite through Gate 3, and end-to-end tests of the CLI. Plus manual runs on the
 real ClinVar file, checked against plain pandas.
 
@@ -1795,7 +1804,11 @@ The verification idea is the part worth keeping.
 
 ```bash
 pip install -r requirements.txt          # install libraries
-python3 -m pytest                        # all 90 tests
+python3 -m pytest                        # all 92 tests
+
+# One command does everything
+python3 -m tracepatch demo/clinvar_summary.py            # find, repair, verify, replace
+python3 -m tracepatch restore demo/clinvar_summary.py    # undo
 
 # The full story on real data
 python3 demo/clinvar_summary.py                          # the script, run normally

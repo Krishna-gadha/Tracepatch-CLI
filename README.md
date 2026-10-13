@@ -52,10 +52,11 @@ python3 -m pytest
 
 | Command | What it does |
 |---|---|
-| `python3 -m tracepatch` | interactive mode: asks for the script, finds its data file, repairs and verifies |
-| `python3 -m tracepatch run SCRIPT` | the same in one command |
+| `python3 -m tracepatch SCRIPT` | **one command**: finds the crash, repairs the script, verifies the repair and replaces the script (original kept as `SCRIPT.orig`). Same as `fix SCRIPT` |
+| `python3 -m tracepatch` | interactive mode: asks for the script, then does the same |
+| `python3 -m tracepatch run SCRIPT` | the same steps with every option exposed; does not replace the script unless `--apply` |
 | `python3 -m tracepatch limit SCRIPT` | only run SCRIPT under a memory limit, as a cluster job would (no repair) |
-| `python3 -m tracepatch restore SCRIPT` | undo `--apply` |
+| `python3 -m tracepatch restore SCRIPT` | undo: put the original script back |
 
 TracePatch reads the data file's path **from the script** (written in the
 `read_csv` call or as a constant at the top). If the script takes the file as
@@ -71,12 +72,18 @@ mkdir -p demo/data
 curl -s https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz | gunzip -c | head -n 300001 > demo/data/clinvar.tsv
 ```
 
-The full story in three commands:
+One command does everything:
 
 ```bash
-python3 -m tracepatch limit demo/clinvar_summary.py        # killed at 500 MB: exit 137, no traceback
-python3 -m tracepatch run demo/clinvar_summary.py --apply  # found, repaired, verified, applied
-python3 -m tracepatch limit demo/clinvar_summary.py        # finishes at about 180 MB, same answer
+python3 -m tracepatch demo/clinvar_summary.py
+```
+
+To see the before and after as well:
+
+```bash
+python3 -m tracepatch limit demo/clinvar_summary.py        # before: killed at 500 MB, exit 137, no traceback
+python3 -m tracepatch demo/clinvar_summary.py              # found, repaired, verified, replaced
+python3 -m tracepatch limit demo/clinvar_summary.py        # after: finishes at about 180 MB, same answer
 python3 -m tracepatch restore demo/clinvar_summary.py      # put the original back
 ```
 
@@ -163,7 +170,7 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - [x] Data file read from the script itself (path in the call, a top-level constant, or an argument)
 - [x] Demo on real ClinVar data: two scripts verified, median refused
 - [x] Demo on synthetic data: `safe_pipeline.py` verified, `unsafe_pipeline.py` refused
-- [x] Test suite (`python3 -m pytest`): 90 tests passing, run automatically on Linux and macOS
+- [x] Test suite (`python3 -m pytest`): 92 tests passing, run automatically on Linux and macOS
 - [x] Risk review: 25 awkward scripts and data files, none crashes (`docs/RISK_REVIEW.md`)
 - [x] LLM rewriting, run live with a local model (`llama3.2` through Ollama): one script repaired and verified, one wrong repair rejected by Gate 3
 - [ ] `LLMRewriter` (Claude) against the real API: implemented, but only tested with a fake client. **No live Claude call has been made** (needs a paid key).
