@@ -77,5 +77,5 @@ def main() -> int:
     if problems:
         print(f"{problems} required item(s) missing. Fix them and run `tracepatch doctor` again.")
         return 1
-    print("Ready. Repair a script with:  tracepatch your_script.py")
+    print("Ready. Repair a script with:  python3 -m tracepatch your_script.py")
     return 0

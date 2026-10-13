@@ -946,10 +946,14 @@ accepted, with a note that it is close to the limit.
 | `python3 -m tracepatch restore SCRIPT` | undo: bring back `SCRIPT.orig` |
 | `python3 -m tracepatch doctor` | check that the libraries and the AI model are ready, with the fix for anything missing |
 
-**It is a package.** `pyproject.toml` describes it, so `pip install .` installs
-TracePatch and adds a `tracepatch` command (`tracepatch script.py` is then the
-same as `python3 -m tracepatch script.py`). The required libraries (pandas,
-numpy, psutil) are installed with it.
+**It is a package.** `pyproject.toml` describes it, so `python3 -m pip install .`
+installs TracePatch and adds a `tracepatch` command (`tracepatch script.py` is
+then the same as `python3 -m tracepatch script.py`). The required libraries
+(pandas, numpy, psutil) are installed with it. From inside the project folder
+you do not need to install anything: `python3 -m tracepatch ...` always works.
+Two things that confuse people: some systems have no `pip` command, only
+`python3 -m pip`; and after installing, the short `tracepatch` command may not
+be found if pip's folder is not on the PATH. In both cases use the `python3 -m` form.
 
 **The AI model is not inside the package**, because a model is about 2 GB and a
 package is a few MB. This is how such tools normally work: the model is
