@@ -43,22 +43,25 @@ script ─► Gate 1 ─► Gate 2 ─► Rewrite ─► Gate 3 ─► Full-scal
 
 Python 3.9+.
 
-Install it as a package (this adds the `tracepatch` command):
+Run it straight from this folder (nothing to install except the libraries):
 
 ```bash
-pip install .
-tracepatch doctor          # checks the libraries and the AI model, and says how to fix anything missing
-```
-
-Or run it straight from this folder without installing:
-
-```bash
-pip install -r requirements.txt
-python3 -m tracepatch doctor
+python3 -m pip install -r requirements.txt
+python3 -m tracepatch doctor     # checks the libraries and the AI model, and says how to fix anything missing
 python3 -m pytest
 ```
 
-Everywhere below, `python3 -m tracepatch ...` and `tracepatch ...` are the same.
+Or install it as a package, which adds a short `tracepatch` command:
+
+```bash
+python3 -m pip install .
+tracepatch doctor
+```
+
+If `tracepatch` is "command not found" after installing, pip put it in a folder
+that is not on your PATH. Use `python3 -m tracepatch ...` instead; it is the same
+program and always works. (On some systems the command is `pip`, on others only
+`python3 -m pip` exists; the second form works everywhere.)
 
 **The AI model** is not inside the package (a model is about 2 GB). TracePatch
 uses a free local model through [Ollama](https://ollama.com): install Ollama,
