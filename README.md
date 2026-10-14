@@ -11,6 +11,9 @@ silently returns a **wrong answer with no error**, which is worse than crashing.
 TracePatch finds the line that blew up, decides whether chunking is safe,
 rewrites the code, and **accepts the rewrite only after verifying it**:
 same answer on a sample, and memory actually under the cap on the full file.
+A median, a percentile or a mean is repaired exactly by keeping a different
+small summary per chunk: a tally of how often each value occurs, or a sum and
+a count. Anything it cannot prove safe (group-by, sorting, unknown calls) is refused.
 
 Profilers (Scalene, Fil, memory_profiler) detect memory problems but do not fix
 them; an LLM can suggest a fix but gives no correctness guarantee. TracePatch
@@ -34,8 +37,8 @@ script ─► Gate 1 ─► Gate 2 ─► Rewrite ─► Gate 3 ─► Full-scal
 | Stage | File | What it does |
 |---|---|---|
 | Gate 1 | `tracepatch/gate1_tracer.py`, `_trace_child.py` | Runs the script as a child process. A thread records the current line + RSS every 50 ms and **flushes each sample**, so the record survives the kill. A watchdog kills the child at `--mem-limit-mb` (reported as a simulated exit 137), so demos never exhaust real RAM. |
-| Gate 2 | `tracepatch/gate2_ast.py` | Isolates the function containing the crash line and checks every call against an **allowlist** (default-deny). `median`, `sorted(...)`, or anything unrecognised is refused. |
-| Rewrite | `tracepatch/rewriter.py` | `TemplateRewriter` (no network; `sum`/`count`/`min`/`max`/`len`) or `LLMRewriter` (Claude, key from `ANTHROPIC_API_KEY`). Output must use `read_csv(..., chunksize=CHUNKSIZE)`. |
+| Gate 2 | `tracepatch/gate2_ast.py` | Isolates the function containing the crash line and checks every call against an **allowlist** (default-deny). `groupby`, `sorted(...)`, or anything unrecognised is refused. `mean`, `median` and `quantile` are accepted because the rewriter rebuilds them from a per-chunk summary, not from per-chunk means or medians. |
+| Rewrite | `tracepatch/rewriter.py` | `TemplateRewriter` (no network; `sum`/`count`/`min`/`max`/`len`; `mean` as total sum / total count; `median` and `quantile(q)` from a tally of value counts) or `LLMRewriter` (Claude, key from `ANTHROPIC_API_KEY`). Output must use `read_csv(..., chunksize=CHUNKSIZE)`. |
 | Gate 3 | `tracepatch/gate3_sandbox.py`, `gate3_oracle.py` | Runs the original and the patched function on a sample in separate subprocesses (temp dir, timeout, memory cap, no secrets in the environment). Compares with `numpy.allclose(rtol=1e-5, atol=1e-8)` for numbers (chunking reorders float additions), exact match for strings, reject on shape mismatch. `CHUNKSIZE` is set small so the sample really is split into several chunks. |
 | Full-scale check | `tracepatch/orchestrator.py` | Runs the whole patched script on the full file with Gate 1 attached. If memory still spikes, the new peak line goes back through Gate 2 → rewrite → Gate 3. At most 3 attempts, then a loud failure. |
 
@@ -112,7 +115,8 @@ python3 -m tracepatch restore demo/clinvar_summary.py      # put the original ba
 |---|---|---|
 | `demo/clinvar_summary.py` | records, lab submissions, average and max per record | **verified**: 678 MB → about 180 MB |
 | `demo/clinvar_pathogenic.py` | how many records are pathogenic | **verified**: 115,014 of 300,000 |
-| `demo/clinvar_median.py` | median submissions | **refused** by Gate 2, with advice that works (load only the needed column: 107 MB) |
+| `demo/clinvar_median.py` | median, 90th percentile and average submissions | **verified** with a tally: 3.0, 12.0, 5.07, peak 182 MB (the column has 79 different values) |
+| `demo/clinvar_by_gene.py` | submissions per gene (group-by) | **refused** by Gate 2, with advice; nothing changed |
 | `demo/clinvar_needs_llm.py` | filter rows, then sum | with `--rewriter auto`: the local LLM writes the repair, **verified** |
 | `demo/clinvar_llm_rejected.py` | max and min of filtered rows | with `--rewriter auto`: the local LLM's repair is wrong, **rejected** by Gate 3 |
 
@@ -173,11 +177,12 @@ VERIFIED PATCH: tracepatch_out/safe_pipeline.patched.py
   output:        sites=4000000, called=3959902, total_depth=237605570.000, mean_depth=60.003, min_depth=1.000, max_depth=119.000
 ```
 
-The output matches plain pandas run with no memory cap. The `median` pipeline:
+The output matches plain pandas run with no memory cap. The group-by pipeline:
 
 ```
-[Gate 2] REFUSED: non-decomposable op: median() at line 17
-REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
+[Gate 2] REFUSED: non-decomposable op: groupby() at line 17
+REFUSED: non-decomposable op: groupby() at line 17; nothing was rewritten
+  What you can do: TracePatch does not repair group-by yet. If the script needs only a few columns, load just those: read_csv(..., usecols=[...]).
 ```
 
 ## Status
@@ -185,13 +190,13 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 - [x] Gate 1: memory tracer with flushed samples and a watchdog memory cap
 - [x] Gate 2: allowlist AST gate (attribute calls and bare-name calls; module-level crash handled)
 - [x] Gate 3: tolerance-based oracle + subprocess sandbox
-- [x] `TemplateRewriter`: sum / count / min / max / len, and counting rows that match a condition
+- [x] `TemplateRewriter`: sum / count / min / max / len, counting rows that match a condition, and mean / median / percentiles
 - [x] Orchestrator with full-scale verification loop (max 3 attempts)
 - [x] CLI: `run`, interactive mode, `limit`, `--apply` / `restore`
 - [x] Data file read from the script itself (path in the call, a top-level constant, or an argument)
-- [x] Demo on real ClinVar data: two scripts verified, median refused
+- [x] Demo on real ClinVar data: three scripts verified (including median and percentile), group-by refused
 - [x] Demo on synthetic data: `safe_pipeline.py` verified, `unsafe_pipeline.py` refused
-- [x] Test suite (`python3 -m pytest`): 98 tests passing, run automatically on Linux and macOS
+- [x] Test suite (`python3 -m pytest`): 113 tests passing, run automatically on Linux and macOS
 - [x] Risk review: 25 awkward scripts and data files, none crashes (`docs/RISK_REVIEW.md`)
 - [x] LLM rewriting, run live with a local model (`llama3.2` through Ollama): one script repaired and verified, one wrong repair rejected by Gate 3
 - [ ] `LLMRewriter` (Claude) against the real API: implemented, but only tested with a fake client. **No live Claude call has been made** (needs a paid key).
@@ -237,7 +242,7 @@ REFUSED: non-decomposable op: median() at line 17; nothing was rewritten
 tracepatch/   cli.py  interactive.py  orchestrator.py  dataref.py  datafile.py  gate1_tracer.py
               _trace_child.py  gate2_ast.py  rewriter.py  gate3_sandbox.py
               _sandbox_child.py  gate3_oracle.py  watchdog.py
-demo/         clinvar_summary.py  clinvar_pathogenic.py  clinvar_median.py
+demo/         clinvar_summary.py  clinvar_pathogenic.py  clinvar_median.py  clinvar_by_gene.py
               clinvar_needs_llm.py  clinvar_llm_rejected.py
               make_data.py  safe_pipeline.py  unsafe_pipeline.py
               terminal_demo.sh  app.py  web/        (optional walkthrough and web page)

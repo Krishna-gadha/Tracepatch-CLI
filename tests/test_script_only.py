@@ -150,10 +150,11 @@ def test_one_command_fix_repairs_and_replaces(big_csv, tmp_path, cap_mb, capsys,
 
 def test_one_command_fix_leaves_an_unsafe_script_alone(big_csv, tmp_path, cap_mb, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    script = tmp_path / "median.py"
-    source = (f'import pandas as pd\n\nDATA = {big_csv!r}\n\n\ndef middle():\n'
-              '    df = pd.read_csv(DATA)\n    return df["depth"].median()\n\n\nprint(middle())\n')
+    script = tmp_path / "per_chrom.py"
+    source = (f'import pandas as pd\n\nDATA = {big_csv!r}\n\n\ndef per_chrom():\n'
+              '    df = pd.read_csv(DATA)\n    return df.groupby("chrom")["depth"].sum()\n\n\n'
+              'print(per_chrom())\n')
     script.write_text(source)
     assert main(["fix", str(script), "--mem-limit-mb", str(cap_mb)]) == 2
     assert "was not changed" in capsys.readouterr().out
-    assert script.read_text() == source and not (tmp_path / "median.py.orig").exists()
+    assert script.read_text() == source and not (tmp_path / "per_chrom.py.orig").exists()

@@ -6,7 +6,7 @@
 #   CAP=200 bash demo/terminal_demo.sh file.csv   # smaller files need a smaller memory cap
 #
 # Real ClinVar data (see demo/clinvar_summary.py for the download command):
-#   SCRIPT=demo/clinvar_summary.py UNSAFE=demo/clinvar_median.py CAP=500 CHUNK_ROWS=25000 \
+#   SCRIPT=demo/clinvar_summary.py UNSAFE=demo/clinvar_by_gene.py CAP=500 CHUNK_ROWS=25000 \
 #     bash demo/terminal_demo.sh demo/data/clinvar.tsv
 #
 # Process: load a dataset, run an analysis script on it, watch it crash under
@@ -17,7 +17,7 @@
 cd "$(dirname "$0")/.." || exit 1
 DATA="${1:-demo/big.csv}"
 SCRIPT="${SCRIPT:-demo/safe_pipeline.py}"     # the analysis script
-UNSAFE="${UNSAFE:-demo/unsafe_pipeline.py}"   # the median script (must be refused)
+UNSAFE="${UNSAFE:-demo/unsafe_pipeline.py}"   # a group-by script (must be refused)
 CHUNK_ROWS="${CHUNK_ROWS:-100000}"            # wide tables (e.g. ClinVar) need fewer
 NAME=$(basename "$SCRIPT" .py)
 CAP="${CAP:-300}"   # override: CAP=200 bash demo/terminal_demo.sh file.csv
@@ -110,8 +110,8 @@ measure python3 tracepatch_out/$NAME.patched.py "$DATA"; MB2=$PEAK
 echo "${green}${bold}  → peak memory: ${MB2} MB${reset}  (before: ${MB} MB)"
 pause
 
-step 8 "An unsafe script is refused (median)"
-say "The median of chunk medians is not the median. Chunking would give a WRONG answer silently."
+step 8 "A script TracePatch cannot prove safe is refused (group-by)"
+say "TracePatch does not repair group-by, so it refuses instead of guessing. Nothing is changed."
 FUNC_LINE=$(grep -n "^def " "$UNSAFE" | head -1 | cut -d: -f1)
 run sed -n "${FUNC_LINE},$((FUNC_LINE + 2))p" "$UNSAFE"
 run python3 -m tracepatch run "$UNSAFE" --data "$DATA" --mem-limit-mb $CAP
