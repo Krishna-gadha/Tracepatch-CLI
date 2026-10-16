@@ -27,12 +27,12 @@ def test_safe_pipeline_is_patched_and_verified(big_csv, tmp_path, cap_mb):
     assert "chunksize=CHUNKSIZE" in open(r.patch_path).read()
 
 
-def test_median_pipeline_is_refused_and_nothing_written(big_csv, tmp_path, cap_mb):
+def test_groupby_pipeline_is_refused_and_nothing_written(big_csv, tmp_path, cap_mb):
     out = tmp_path / "out"
-    r = run(os.path.join(FIX, "median_pipeline.py"), big_csv, cap_mb,
+    r = run(os.path.join(FIX, "groupby_pipeline.py"), big_csv, cap_mb,
             out_dir=str(out), echo=quiet)
     assert r.status == "refused" and r.exit_code == 2
-    assert "median" in r.message and "nothing was rewritten" in r.message
+    assert "groupby" in r.message and "nothing was rewritten" in r.message
     assert not out.exists()
 
 

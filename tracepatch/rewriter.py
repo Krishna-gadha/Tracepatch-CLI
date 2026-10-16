@@ -2,8 +2,9 @@
 
 One small interface, two implementations, so providers are swappable:
 - TemplateRewriter: deterministic, no network. Handles only simple
-  aggregations: df[col].sum() / .count() / .min() / .max(), len(df), and
-  counting rows that match a simple condition: (df[col] == value).sum().
+  aggregations: df[col].sum() / .count() / .min() / .max(), len(df),
+  counting rows that match a simple condition: (df[col] == value).sum(),
+  and df[col].mean() / .median() / .quantile(q).
   This is the demo default and what the tests use.
 - LLMRewriter: asks Claude via the Anthropic API. Key comes from the
   ANTHROPIC_API_KEY environment variable, never from code.
@@ -25,7 +26,7 @@ import urllib.error
 import urllib.request
 from typing import List, Optional, Tuple
 
-from tracepatch.gate2_ast import LOADER_METHODS
+from tracepatch.gate2_ast import LOADER_METHODS, SUMMARY_STATS
 
 
 class RewriteError(Exception):
@@ -58,7 +59,8 @@ COMBINE = {
     "max": "max",    # global max = max of chunk maxes
 }
 CHUNK_VAR = "_tp_chunk"
-SUPPORTED = "template handles {df}[col].sum/count/min/max(), ({df}[col] == value).sum() and len({df})"
+SUPPORTED = ("template handles {df}[col].sum/count/min/max/mean/median/quantile(), "
+             "({df}[col] == value).sum() and len({df})")
 
 
 def _is_column(node, df: str) -> bool:
@@ -91,6 +93,28 @@ def _is_condition_count(node: ast.Call, df: str) -> bool:
             and isinstance(f.value.comparators[0], ast.Constant))
 
 
+def _summary_stat(node: ast.Call, df: str):
+    """("mean", None) for df[col].mean(); ("quantile", q) for df[col].median()
+    (q = 0.5) and df[col].quantile(q) with q a plain number. None otherwise."""
+    f = node.func
+    if not (isinstance(f, ast.Attribute) and f.attr in SUMMARY_STATS and _is_column(f.value, df)):
+        return None
+    if f.attr in ("mean", "median"):
+        if node.args or node.keywords:
+            return None  # e.g. skipna=False: not handled, so not rewritten
+        return ("mean", None) if f.attr == "mean" else ("quantile", 0.5)
+    given = list(node.args) + [kw.value for kw in node.keywords if kw.arg == "q"]
+    if len(given) != len(node.args) + len(node.keywords) or len(given) > 1:
+        return None  # other options, such as interpolation=, are not handled
+    if not given:
+        return ("quantile", 0.5)
+    q = given[0]
+    if (isinstance(q, ast.Constant) and isinstance(q.value, (int, float))
+            and not isinstance(q.value, bool) and 0 <= q.value <= 1):
+        return ("quantile", float(q.value))
+    return None
+
+
 def _is_len(node: ast.Call, df: str) -> bool:
     # Matches len(df).
     return (isinstance(node.func, ast.Name) and node.func.id == "len"
@@ -110,14 +134,34 @@ class _Rename(ast.NodeTransformer):
 
 class _AggCollector(ast.NodeTransformer):
     """Replaces each supported aggregation on df with a variable _tp_agg_N,
-    and remembers how to compute that variable chunk by chunk."""
+    and remembers how to compute that variable chunk by chunk.
+
+    Each entry of self.aggs is one of:
+      ("simple", per-chunk expression, combine fn, keep as a plain Python int?)
+      ("mean", column expression)
+      ("quantile", tally number, q)
+    Median and percentiles of the same column share one tally."""
 
     def __init__(self, df: str):
         self.df = df
-        # (per-chunk expression, combine fn, keep as a plain Python int?)
-        self.aggs: List[Tuple[str, str, bool]] = []
+        self.aggs: List[tuple] = []
+        self.tallies: List[str] = []  # column expression per tally
+
+    def _name_for(self, key, node):
+        if key not in self.aggs:  # same expression twice -> compute once
+            self.aggs.append(key)
+        return ast.copy_location(ast.Name(f"_tp_agg_{self.aggs.index(key)}", ast.Load()), node)
 
     def visit_Call(self, node):
+        stat = _summary_stat(node, self.df)
+        if stat:
+            column = ast.unparse(_Rename(self.df, CHUNK_VAR).visit(copy.deepcopy(node.func.value)))
+            kind, q = stat
+            if kind == "mean":
+                return self._name_for(("mean", column), node)
+            if column not in self.tallies:
+                self.tallies.append(column)
+            return self._name_for(("quantile", self.tallies.index(column), q), node)
         as_int = False
         if _is_column_agg(node, self.df):
             combine = COMBINE[node.func.attr]
@@ -129,10 +173,7 @@ class _AggCollector(ast.NodeTransformer):
         else:
             return self.generic_visit(node)
         per_chunk = ast.unparse(_Rename(self.df, CHUNK_VAR).visit(copy.deepcopy(node)))
-        key = (per_chunk, combine, as_int)
-        if key not in self.aggs:  # same expression twice -> compute once
-            self.aggs.append(key)
-        return ast.copy_location(ast.Name(f"_tp_agg_{self.aggs.index(key)}", ast.Load()), node)
+        return self._name_for(("simple", per_chunk, combine, as_int), node)
 
 
 def _find_loader(func: ast.FunctionDef):
@@ -151,6 +192,63 @@ def _find_loader(func: ast.FunctionDef):
 def _indent(code: str, level: int) -> str:
     pad = "    " * level
     return "\n".join(pad + line if line.strip() else line for line in code.splitlines())
+
+
+def _chunked_body(collector: _AggCollector, loader: ast.Call, module: str) -> List[str]:
+    """The loop over chunks and the merge after it, as lines of code."""
+    aggs, tallies = collector.aggs, collector.tallies
+    start, per_chunk, merge = [], [], []
+    for i, agg in enumerate(aggs):
+        if agg[0] == "simple":
+            _, expr, combine, as_int = agg
+            start.append(f"_tp_parts_{i} = []")
+            per_chunk.append(f"_tp_parts_{i}.append({expr})")
+            merged = f"{module}.Series(_tp_parts_{i}).{combine}()"
+            merge.append(f"_tp_agg_{i} = {'int(' + merged + ')' if as_int else merged}")
+        elif agg[0] == "mean":
+            # The mean of chunk means is wrong when chunks differ in size, so keep
+            # each chunk's sum and count and divide the totals once at the end.
+            column = agg[1]
+            start += [f"_tp_sums_{i} = []", f"_tp_counts_{i} = []"]
+            per_chunk += [f"_tp_sums_{i}.append({column}.sum())",
+                          f"_tp_counts_{i}.append({column}.count())"]
+            merge += [f"_tp_n_{i} = {module}.Series(_tp_counts_{i}).sum()",
+                      f"_tp_agg_{i} = {module}.Series(_tp_sums_{i}).sum() / _tp_n_{i} "
+                      f"if _tp_n_{i} else float('nan')"]
+    for j, column in enumerate(tallies):
+        # A tally: how many times each value occurs. Its size depends on how many
+        # DIFFERENT values the column has, not on how many rows the file has.
+        start.append(f"_tp_tally_{j} = {module}.Series(dtype='float64')")
+        per_chunk.append(f"_tp_tally_{j} = _tp_tally_{j}.add({column}.value_counts(), fill_value=0)")
+
+    lines = [f"    {line}" for line in start]
+    lines.append(f"    for {CHUNK_VAR} in {ast.unparse(loader)}:")
+    lines += [f"        {line}" for line in per_chunk]
+    lines.append("    # Merge the partial results (pandas skips NaN, like the original).")
+    lines += [f"    {line}" for line in merge]
+    for j in range(len(tallies)):
+        lines += [
+            f"    # Median / percentiles: line the values up in order and count along",
+            f"    # the tally to the wanted position (pandas' own method, so same answer).",
+            f"    _tp_values_{j} = _tp_tally_{j}.sort_index()",
+            f"    _tp_upto_{j} = _tp_values_{j}.cumsum()  # rows with this value or smaller",
+            f"    _tp_rows_{j} = int(_tp_values_{j}.sum())",
+        ]
+        for i, agg in enumerate(aggs):
+            if agg[0] != "quantile" or agg[1] != j:
+                continue
+            q = agg[2]
+            lines += [
+                f"    if _tp_rows_{j} == 0:",
+                f"        _tp_agg_{i} = float('nan')",
+                f"    else:",
+                f"        _tp_pos = {q!r} * (_tp_rows_{j} - 1)  # position in the sorted values",
+                f"        _tp_k = int(_tp_pos)",
+                f"        _tp_lo = _tp_values_{j}.index[_tp_upto_{j}.searchsorted(_tp_k + 1)]",
+                f"        _tp_hi = _tp_values_{j}.index[_tp_upto_{j}.searchsorted(min(_tp_k + 2, _tp_rows_{j}))]",
+                f"        _tp_agg_{i} = _tp_lo + (_tp_hi - _tp_lo) * (_tp_pos - _tp_k)",
+            ]
+    return lines
 
 
 class TemplateRewriter(Rewriter):
@@ -196,15 +294,7 @@ class TemplateRewriter(Rewriter):
         for stmt in func.body[:idx]:
             lines.append(_indent(ast.unparse(stmt), 1))
         lines.append("    # TracePatch: read in chunks, keep one small partial result per chunk.")
-        for i in range(len(collector.aggs)):
-            lines.append(f"    _tp_parts_{i} = []")
-        lines.append(f"    for {CHUNK_VAR} in {ast.unparse(loader)}:")
-        for i, (per_chunk, _, _) in enumerate(collector.aggs):
-            lines.append(f"        _tp_parts_{i}.append({per_chunk})")
-        lines.append("    # Merge the partial results (pandas skips NaN, like the original).")
-        for i, (_, combine, as_int) in enumerate(collector.aggs):
-            merged = f"{module}.Series(_tp_parts_{i}).{combine}()"
-            lines.append(f"    _tp_agg_{i} = {'int(' + merged + ')' if as_int else merged}")
+        lines += _chunked_body(collector, loader, module)
         for stmt in after:
             lines.append(_indent(ast.unparse(stmt), 1))
         code = "\n".join(lines) + "\n"

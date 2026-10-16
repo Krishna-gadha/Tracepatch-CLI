@@ -21,7 +21,7 @@ We attacked the tool the way a careful user or examiner would:
   instead of trying smaller chunks;
 - **a backup that could be overwritten**, and several confusing messages.
 
-The test suite grew from 66 to 98 tests. All 25 cases now end in one of four
+The test suite grew from 66 to 98 tests (113 after the median work of Oct 15). All 25 cases now end in one of four
 clean outcomes: `VERIFIED`, `REFUSED`, `FAILED` with a reason, or `NO_PROBLEM`.
 None crashes.
 
@@ -49,11 +49,13 @@ This is the most serious kind of failure, because nobody would notice it.
 | 1.4 | The rewrite sets `CHUNKSIZE` itself (a real local-model answer did this), so the sample fits in one chunk and merging is never tested. | Would pass Gate 3. | Any patch that assigns `CHUNKSIZE` is rejected before it runs. | `test_patch_that_sets_chunksize_itself_is_rejected` |
 | 1.5 | The rewrite keeps only the last chunk's result. | Caught. | Unchanged; already covered. | `test_last_chunk_bug_is_caught` |
 | 1.6 | A problem that only appears late in the file. The sample was the first 5,000 rows only. | Could be missed. | The sample is now taken from **5 places across the file** (start to end). | `test_sample_is_taken_from_across_the_file` |
-| 1.7 | A non-chunkable operation (median, sort, duplicates, group-by) is chunked. | Refused. | Unchanged: Gate 2's allowlist refuses anything not known to be safe. | `test_median_refused`, `test_unknown_method_refused` |
+| 1.7 | A non-chunkable operation (sort, duplicates, group-by) is chunked. | Refused. | Unchanged: Gate 2's allowlist refuses anything not known to be safe. Since Oct 15, median, percentiles and mean are repaired with a per-chunk tally or sum and count, never from per-chunk medians or means. | `test_groupby_and_mode_refused`, `tests/test_summary_stats.py`, `test_unknown_method_refused` |
 | 1.8 | Float results differ in the last digits because additions are reordered, and a correct patch is rejected. | Handled. | Unchanged: tolerance comparison (`rtol=1e-5`, `atol=1e-8`). | `test_float_reordering_accepted_although_not_exactly_equal` |
 | 1.9 | The rewrite reads a different file than the original. | Not checked. | Rejected: "does not read the data file that the original reads". | `test_patch_reading_a_different_file_is_rejected` |
 | 1.10 | `len(df)` came back as a numpy integer instead of a plain integer, so it printed differently inside a tuple. | Value right, type changed. | The template keeps it a plain `int`. | `test_template_keeps_len_as_a_plain_int` |
-| 1.11 | A refusal leaves the person with nothing to do next. | Refused, with no guidance. | Every refusal now carries advice: for a median, load only the needed column (checked: 107 MB, same answer); for a mean, write it as sum ÷ count, which TracePatch repairs. The decision itself is unchanged. | `test_refusal_comes_with_advice`, `test_mean_is_refused_with_the_form_that_can_be_repaired` |
+| 1.11 | A refusal leaves the person with nothing to do next. | Refused, with no guidance. | Every refusal now carries advice, e.g. for group-by: load only the needed columns. (At the time of the review this also covered median and mean; since Oct 15 both are repaired directly.) The decision itself is unchanged. | `test_refusal_comes_with_advice` |
+| 1.12 | *(added Oct 15)* A median or percentile repair keeps a tally of values, and the column has almost no repeated values, so the tally is as big as the column. | — | The full-file check catches it like any other memory problem; the message says why ("one count for every DIFFERENT value") and nothing is accepted. | `test_a_tally_too_big_for_memory_fails_clearly` |
+| 1.13 | *(added Oct 15)* The median or percentile from the tally differs from pandas: even or odd row counts, missing values, an empty column, uneven chunks. | — | The tally uses pandas' own method (position q × (n − 1), halfway between neighbours when needed). Checked against pandas through Gate 3 for each of those cases. | `tests/test_summary_stats.py` |
 
 ## 2. Data files
 
@@ -146,7 +148,7 @@ These cannot be removed. They can only be stated, and each is guarded.
 |---|---|---|
 | **The LLM is a small local model; Claude has not been run live.** | A stronger model needs a paid key. | The gates do not depend on the model being good. A wrong answer is rejected (shown live). |
 | **Checking on a sample is not a proof.** | The original cannot finish on the full file, so there is no full answer to compare with. Nothing can check against an answer that cannot be computed. | The sample comes from across the file, in uneven chunks, and the full-scale run checks memory for real. |
-| **Only operations known to be chunk-safe are repaired.** Median, sort, group-by, `mean()` and anything unrecognised are refused. | Guessing here gives silent wrong answers. Refusing is the point. | The refusal names the operation and the line. |
+| **Only operations known to be chunk-safe are repaired.** Sort, group-by, duplicates and anything unrecognised are refused. (Median, percentiles and `mean()` are repaired since Oct 15; a median or percentile only saves memory when values repeat.) | Guessing here gives silent wrong answers. Refusing is the point. | The refusal names the operation and the line. |
 | **The loading must be inside a function that returns or prints its result.** Flat scripts and functions that return the whole table are refused. | The function is the unit that can be run on a sample and compared. | The message says how to restructure the script. |
 | **One load per function.** | The rewrite handles one `read_csv` at a time. | Fails clearly; nothing is accepted. |
 | **Only the script's own process is measured.** | Scripts that start other processes are outside what the tracer sees. | Stated. |
@@ -183,7 +185,7 @@ These cannot be removed. They can only be stated, and each is guarded.
 | Z2 | Two big loads in one function | FAILED, explained |
 | Z3 | Data read from a web address | FAILED, the script's own error |
 | Z4 | Flat script, no functions | REFUSED, with how to fix |
-| Z5 | `mean()` of a column | REFUSED |
+| Z5 | `mean()` of a column | REFUSED at the time of the review; VERIFIED since Oct 15 (sum and count per chunk) |
 | Z6 | `groupby` | REFUSED |
 
 For every VERIFIED case, the repaired script's output was compared with the

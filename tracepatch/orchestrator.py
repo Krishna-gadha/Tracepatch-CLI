@@ -164,6 +164,7 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
     workdir = tempfile.mkdtemp(prefix="tracepatch_run_")
     try:
         current_source, fault_line, feedback = original_source, t.peak_line, None
+        patched_func = ""
         # Set when a patch already passed Gate 3 and only needs smaller chunks.
         retry_smaller = None
 
@@ -308,6 +309,10 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                     feedback = f"{rows_per_chunk:,} rows per chunk still used {full.peak_mb:.0f} MB"
                     retry_smaller = (func_name, patched_func, ref, smaller)
                     continue
+                if full.peak_function == func_name and TALLY_CALL in patched_func:
+                    # Our own merge step is too big; Gate 2 on our own patch would make no sense.
+                    return finish("failed", f"the repaired {func_name}() still used {full.peak_mb:.0f} MB "
+                                            f"at line {full.peak_line}, after reading the file. {TALLY_NOTE}")
                 say(f"[Verify] still spiked: {full.peak_mb:.0f} MB at line {full.peak_line} "
                     f"in {full.peak_function}(); treating that as a new fault")
                 say(_show_line(candidate, full.peak_line))
@@ -352,10 +357,18 @@ def run(script: str, data: Optional[str] = None, mem_limit_mb: float = 300,
                           f"  diff:          {report.diff_path}\n"
                           f"  output:        {shown_output}{applied}")
 
+        note = f"\n  {TALLY_NOTE}" if TALLY_CALL in patched_func else ""
         return finish("failed", f"no memory-safe, verified patch after {max_attempts} attempts "
-                                f"(last problem: {feedback})")
+                                f"(last problem: {feedback}){note}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+# A median or percentile repair keeps a tally of the column's values (see rewriter.py).
+TALLY_CALL = "value_counts("
+TALLY_NOTE = ("A median or percentile keeps one count for every DIFFERENT value in the column; "
+              "when almost every value is different, that tally is as big as the column itself. "
+              "Nothing was accepted.")
 
 
 def inside_chunk_loop(source: str, func_name: str, line_no: int) -> bool:

@@ -25,7 +25,7 @@ applied the repair; undo it with `python3 -m tracepatch restore demo/clinvar_sum
 ```bash
 python3 -m pytest
 ```
-Must end with `98 passed`.
+Must end with `113 passed`.
 
 ```bash
 ollama list
@@ -223,17 +223,29 @@ Then put the original back, so the next demo starts clean:
 python3 -m tracepatch restore demo/clinvar_summary.py
 ```
 
-### 6. A script that must be refused
+### 6. The median: the piece-by-piece trap, handled correctly
 
 ```bash
 python3 -m tracepatch run demo/clinvar_median.py
 ```
 
-> "This computes a median. The median of the pieces is not the median of the whole
-> file, so chunking would give a wrong answer with no error. Gate 2 refuses, and
-> nothing is changed. Line 14 is where memory blew up; line 15 is why it can't be fixed.
-> And it tells the person what to do instead: load only the column the median needs.
-> We checked that: it runs in 107 MB with the same answer."
+> "This computes the median, the 90th percentile and the average of lab submissions.
+> The median of the pieces is NOT the median of the whole file: [1, 1, 2] and
+> [3, 9, 9, 9] give 1 and 9, so 5, but the real median is 3. So TracePatch does not
+> take medians of pieces. It keeps a tally: how many records have 1 submission, how
+> many have 2, and so on. The tally has 79 lines, not 300,000 rows. At the end it
+> counts along the tally to the middle. Same answers as the original: 3.0, 12.0 and
+> 5.07, in 182 MB instead of being killed."
+
+### 6b. A script that must be refused
+
+```bash
+python3 -m tracepatch run demo/clinvar_by_gene.py
+```
+
+> "This adds up submissions per gene with group-by. TracePatch does not repair
+> group-by, so it refuses instead of guessing, and nothing is changed. It names the
+> line and says what to do instead."
 
 ### 7. The tests
 
@@ -241,7 +253,7 @@ python3 -m tracepatch run demo/clinvar_median.py
 python3 -m pytest
 ```
 
-> "98 automated tests. They cover every gate, a patch with a deliberate bug that
+> "113 automated tests. They cover every gate, a patch with a deliberate bug that
 > Gate 3 must catch, the retry loop stopping after three attempts, and every
 > problem we found when we attacked our own tool. They also run automatically on
 > Linux for every change."
@@ -315,7 +327,7 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 | Number tolerance | relative 1e-5, absolute 1e-8 |
 | Retry cap | 3 attempts |
 | Allowlist | 8 methods + 6 builtins |
-| Tests | 98 |
+| Tests | 113 |
 | Awkward cases tried in the risk review | 25, none crashes |
 | LLM | `llama3.2` (3 billion parameters, 2 GB), local through Ollama |
 | Exit codes | 0 verified, 2 refused, 1 failed, 137 killed by `limit` |
@@ -340,7 +352,7 @@ python3 -m tracepatch run demo/clinvar_llm_rejected.py --rewriter auto
 3. **How do people solve it today?** Mostly by asking for more memory and re-running; or rewriting by hand; or switching to Dask, Polars or DuckDB. None of these checks that the answer stayed the same.
 4. **Would scientists use this as it is?** No. It is a prototype that repairs a small set of patterns. It demonstrates the method: verify an automatic repair before trusting it.
 5. **How do you find the line with no traceback?** A thread writes the current line and memory to a file every 50 ms and flushes it, so the record survives the kill.
-6. **Why refuse the median?** The median of chunk medians is not the median: `[1,2,3]` and `[4,100]` give 27 instead of 3.
+6. **How can a median be done in pieces?** Not by taking medians of pieces: `[1,2,3]` and `[4,100]` give 27 instead of 3. TracePatch keeps a tally of how often each value occurs, adds the tallies, and counts to the middle. That is exact. It only saves memory when values repeat (79 different values in 300,000 ClinVar rows); if almost every value is different, the tally is as big as the column, the full-file check fails, and nothing is accepted.
 7. **Why an allowlist?** A blocklist allows anything it forgot; an allowlist refuses anything it doesn't know. Wrong "safe" answers are silent, so we fail safe.
 8. **Why a tolerance for numbers?** Chunking changes the order of additions, and `(0.1+0.2)+0.3` is not exactly `0.1+(0.2+0.3)`.
 9. **Does passing the sample prove it works on the full file?** No. That is why the full-scale check exists. On our first ClinVar run it caught a patch that still used over 600 MB. Now, when a chunk is too big, it halves the chunk size and checks again.

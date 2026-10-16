@@ -27,6 +27,8 @@ These override the Jul 24 sections below wherever they differ.
 | Gate 3 input | original + patched source + sample path | also `func_name` and `preamble` (the script's top-level imports) — see `verify_patch()` in `tracepatch/gate3_sandbox.py` |
 | Fixtures | `make_test_data.py`, `bad_script.py`, `bad_script_median.py` | `demo/make_data.py`, `demo/safe_pipeline.py`, `demo/unsafe_pipeline.py` |
 
+**Change, Oct 15 (asked for by our guide, agreed by both authors):** Gate 2 now also accepts `mean`, `median` and `quantile` (`SUMMARY_STATS` in `gate2_ast.py`, a separate list from `CHUNK_SAFE_METHODS`). They are never merged from per-chunk means or medians: the rewriter keeps a sum and a count, or a tally of value counts, per chunk. The demo refusal is now group-by (`demo/clinvar_by_gene.py`). Gate boundary dict shapes are unchanged. Examples below that mention `.median()` being refused describe the original plan.
+
 **Addition, Oct 12 (backward compatible):** Gate 3's `verify_patch()` takes an optional `data_ref` (from `tracepatch/dataref.py`) saying how the function gets its data file, so scripts with the path written inside can be tested on the sample. Without it, behaviour is as before.
 
 The dict shapes for each gate below are **unchanged** (Gate 2 success may add an extra `function_name` key).

@@ -120,8 +120,11 @@ OOM means **out of memory**.
   median of the chunk medians = 27    WRONG, and no error is shown
   ```
 
-  A sum works in pieces. A median, a sort, or removing duplicates does not. A
-  wrong answer with no error is worse than a crash, because nobody notices.
+  A sum works in pieces. A median does not, if you take the median of each
+  piece. A wrong answer with no error is worse than a crash, because nobody
+  notices. (TracePatch does the median a different way: it keeps a tally of how
+  often each value occurs, adds the tallies and counts to the middle. That is
+  exact. See "Q: How do you handle the median?" below.)
 
 ### What it costs
 
@@ -293,7 +296,8 @@ why our scripts print "Variant records".
 |---|---|---|
 | `clinvar_summary.py` | number of records, total lab submissions, average and maximum per record | a check on each new download: is it complete, and how much evidence does it hold? |
 | `clinvar_pathogenic.py` | how many records are pathogenic (115,014 of 300,000; 38.3%) | how much of the table is clinically significant |
-| `clinvar_median.py` | the median submissions per record | a normal statistic that **cannot** be chunked; shows the refusal |
+| `clinvar_median.py` | median, 90th percentile and average submissions per record (3, 12, 5.07) | the average is pulled up by a few famous records (up to 95 lab reports); the median is the typical record. Cannot be done from per-chunk medians; TracePatch repairs it with a tally |
+| `clinvar_by_gene.py` | submissions per gene (group-by) | TracePatch does not repair group-by; shows the refusal |
 | `clinvar_needs_llm.py` | lab submissions for pathogenic records only | filter, then sum: needs the language model |
 | `clinvar_llm_rejected.py` | most and fewest submissions among benign records | the model gets it wrong; shows the rejection |
 
@@ -341,9 +345,10 @@ is a working prototype of a method.
 | It finds the line | Live: `KILLED ... fault at line 15`, with no traceback available |
 | It repairs correctly | Output identical to the original run with no limit |
 | It saves memory | 678 MB → about 180 MB on the ClinVar file |
-| It refuses unsafe cases | Live: the median script |
+| It handles the median correctly | Live: median, 90th percentile and average, same answers in 182 MB |
+| It refuses what it cannot prove | Live: the group-by script |
 | It verifies AI-written code | Live: one model rewrite verified, one rejected |
-| It is tested | 98 automated tests, run automatically on Linux and macOS |
+| It is tested | 113 automated tests, run automatically on Linux and macOS |
 | We tried to break it | 25 awkward cases; none crashes (RISK_REVIEW.md) |
 
 ---
@@ -429,17 +434,26 @@ separately we checked the demo results against plain pandas with no limit. On
 the full file under the limit, the original cannot finish, so there is nothing
 to compare with. That is a stated limit.
 
+**Q: How do you handle the median?**
+Not by taking the median of each piece: that is wrong ([1, 2, 3] and [4, 100]
+give 27 instead of 3). Instead, for each piece it counts how many rows have each
+value, adds those counts together, then counts along the combined tally to the
+middle. That gives exactly the median pandas gives; a percentile is the same
+walk, stopping at another position. The tally only stays small when values
+repeat: ClinVar's submissions column has 79 different values in 300,000 rows.
+If almost every value is different, the tally is as big as the column; the
+full-file check then fails and nothing is accepted. The mean is total sum ÷
+total count, never the mean of the piece means.
+
 **Q: What can it not do?**
-Median, sort, group-by, `mean()` and anything it does not recognise are
+Sort, group-by, removing duplicates and anything it does not recognise are
 refused. The loading must be inside a function. One load per function. Tables
 only, with pandas. Windows is untested.
 
 **Q: Is refusing not a weakness?**
 It is the design. A tool that guesses gives silent wrong answers. Ours says
 which operation it could not handle, on which line, and what to do instead. For
-a median it suggests loading only the needed column; we checked that on ClinVar
-and it runs in 107 MB instead of being killed. For a mean it suggests writing it
-as a sum divided by a count, which TracePatch can then repair.
+group-by it suggests loading only the needed columns.
 
 **Q: Is the AI model part of your tool?**
 TracePatch installs as one package (`pip install .`). The model is not inside it,
@@ -462,7 +476,7 @@ prints instead of returning was "verified" with nothing compared; equal-sized
 test chunks hid a wrong formula. We found these by attacking our own tool.
 
 **Q: How do you know your own tool works?**
-98 automated tests, run automatically on Linux and macOS for every change, and
+113 automated tests, run automatically on Linux and macOS for every change, and
 a risk review of 25 awkward cases.
 
 ---

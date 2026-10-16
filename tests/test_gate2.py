@@ -16,6 +16,13 @@ def median_depth(path):
     return df["depth"].median()
 '''
 
+GROUPBY = '''import pandas as pd
+
+def per_chrom(path):
+    df = pd.read_csv(path)
+    return df.groupby("chrom")["depth"].sum()
+'''
+
 SORTED = '''import pandas as pd
 
 def top(path):
@@ -46,10 +53,19 @@ def test_safe_function_accepted():
     assert report.is_safe, report.explain()
 
 
-def test_median_refused():
-    report = check(MEDIAN, 4)
+def test_median_accepted_because_it_is_repaired_with_a_tally():
+    # Not via CHUNK_SAFE_METHODS: the median of chunk medians is wrong. Gate 2
+    # accepts it because the rewriter rebuilds it from a per-chunk tally.
+    assert check(MEDIAN, 4).is_safe
+    assert check(MEDIAN.replace(".median()", ".quantile(0.9)"), 4).is_safe
+    assert check(MEDIAN.replace(".median()", ".mean()"), 4).is_safe
+
+
+def test_groupby_and_mode_refused():
+    report = check(GROUPBY, 4)
     assert not report.is_safe
-    assert ("median", 5) in report.unsafe_calls
+    assert ("groupby", 5) in report.unsafe_calls
+    assert ("mode", 5) in check(MEDIAN.replace(".median()", ".mode()"), 4).unsafe_calls
 
 
 def test_bare_sorted_refused():
@@ -85,15 +101,8 @@ def test_run_gate2_contract_shape_on_success():
 
 
 def test_refusal_comes_with_advice():
-    out = run_gate2(MEDIAN, 4)
+    out = run_gate2(GROUPBY, 4)
     assert out["safe"] is False
-    assert any("median" in tip and "usecols" in tip for tip in out["advice"])
-
-
-def test_mean_is_refused_with_the_form_that_can_be_repaired():
-    src = MEDIAN.replace(".median()", ".mean()")
-    out = run_gate2(src, 4)
-    assert out["safe"] is False
-    assert any(".sum() / df[col].count()" in tip for tip in out["advice"])
+    assert any("group-by" in tip and "usecols" in tip for tip in out["advice"])
     unknown = run_gate2(UNKNOWN, 4)
     assert any("frobnicate()" in tip for tip in unknown["advice"])

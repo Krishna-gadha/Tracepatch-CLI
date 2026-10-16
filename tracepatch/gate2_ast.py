@@ -4,7 +4,7 @@ Question this gate answers: "If we read the data in chunks instead of all at
 once, will this function still give the same answer?"
 
 Design: ALLOWLIST, default-deny. Every call inside the crashing function must
-be on an allowlist. Anything else (known-bad like .median(), or simply
+be on an allowlist. Anything else (known-bad like .sort_values(), or simply
 unrecognised) is refused. A blocklist would default to "safe" for anything
 it had never seen, which is the wrong failure mode.
 
@@ -33,6 +33,15 @@ CHUNK_SAFE_METHODS = {
     "astype",  # row-wise: element-by-element type conversion
 }
 
+# Statistics that can NOT be merged from the same statistic per chunk (the
+# median of chunk medians is not the median), but CAN be rebuilt exactly from
+# a different small summary of each chunk. The rewriter writes that summary.
+SUMMARY_STATS = {
+    "mean",      # total of chunk sums / total of chunk counts
+    "median",    # add up a tally per chunk (how often each value occurs),
+    "quantile",  # then walk the combined tally to the middle (or any percentile)
+}
+
 # Bare-name calls (builtins) that are safe. Anything else called by plain
 # name (sorted, max, median, user functions...) is refused.
 SAFE_BUILTINS = {
@@ -47,7 +56,7 @@ SAFE_BUILTINS = {
 # Known non-decomposable methods. Used only to give a clearer explanation;
 # they would be refused anyway because they are not on the allowlist.
 KNOWN_UNSAFE_METHODS = {
-    "median", "quantile", "mode",            # need all values at once
+    "mode",                                  # most common per piece is not most common overall
     "sort_values", "sort_index", "rank",     # need global ordering
     "drop_duplicates", "unique", "nunique",  # duplicates can span chunks
     "std", "var",                            # not a plain per-chunk combine
@@ -69,6 +78,9 @@ PATCH_HELPER_CALLS = {
     "isinstance", "enumerate", "zip",                 # plain loop helpers
     "items", "keys", "values", "get", "update", "add",  # dict / set bookkeeping
     "isnull", "notnull", "fillna",                    # row-wise missing-value handling
+    # Median and percentiles: build the tally per chunk, then walk it in order.
+    # They only ever touch the small tally, never the data.
+    "value_counts", "sort_index", "cumsum", "searchsorted",
 }
 
 
@@ -99,10 +111,6 @@ LOADER_METHODS = {
 # the operation is still refused. It only makes the refusal useful.
 COLUMNS_HINT = "If the script needs only a few columns, load just those: read_csv(..., usecols=[...])."
 ADVICE = {
-    "mean": "A mean can be written as a sum divided by a count, df[col].sum() / df[col].count(), "
-            "and TracePatch can repair that form.",
-    "median": "A median needs every value at once, so it cannot be merged from pieces. " + COLUMNS_HINT,
-    "quantile": "A quantile needs every value at once, so it cannot be merged from pieces. " + COLUMNS_HINT,
     "mode": "The most common value in each piece is not the most common overall. " + COLUMNS_HINT,
     "sort_values": "Sorting needs the whole table in order. " + COLUMNS_HINT,
     "sort_index": "Sorting needs the whole table in order. " + COLUMNS_HINT,
@@ -187,7 +195,7 @@ def check_decomposability(func_node: ast.FunctionDef) -> DecomposabilityReport:
             continue
         kind, name = _call_name(node)
         if kind == "attr":
-            if name in LOADER_METHODS or name in CHUNK_SAFE_METHODS:
+            if name in LOADER_METHODS or name in CHUNK_SAFE_METHODS or name in SUMMARY_STATS:
                 continue
         elif kind == "name":
             if name in SAFE_BUILTINS:

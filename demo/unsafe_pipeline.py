@@ -1,8 +1,8 @@
 """Demo pipeline that TracePatch must REFUSE.
 
-The median needs every value at once: the median of chunk medians is NOT the
-median of the file. Naively chunking this would return a wrong answer with
-no error, which is worse than crashing. Gate 2 must refuse it.
+Group-by is not something TracePatch repairs, so Gate 2 refuses it rather
+than guess. (Median, percentiles and mean ARE repaired, with a tally or a
+sum and a count; see demo/clinvar_median.py.)
 
   python3 demo/unsafe_pipeline.py demo/big.csv
 """
@@ -12,10 +12,10 @@ import sys
 import pandas as pd
 
 
-def median_depth(path):
+def depth_per_chromosome(path):
     df = pd.read_csv(path)
-    return df["depth"].median()
+    return df.groupby("chrom")["depth"].sum()
 
 
 if __name__ == "__main__":
-    print(f"median_depth={median_depth(sys.argv[1])}")
+    print(depth_per_chromosome(sys.argv[1]).to_dict())

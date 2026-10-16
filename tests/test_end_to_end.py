@@ -45,5 +45,5 @@ def test_unsafe_demo_is_refused(data, cap, tmp_path, capsys):
                  "--mem-limit-mb", cap, "--out-dir", str(out_dir)])
     out = capsys.readouterr().out
     assert code == 2
-    assert "REFUSED: non-decomposable op: median()" in out
+    assert "REFUSED: non-decomposable op: groupby()" in out
     assert "[Rewrite]" not in out and not out_dir.exists()

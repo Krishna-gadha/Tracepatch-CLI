@@ -82,6 +82,7 @@ median of the chunk medians = median([2, 52]) = 27      ← WRONG (should be 3)
 ```
 
 A wrong answer with no error is **worse than a crash**: nobody notices.
+(TracePatch does get the median right, a different way: see section 16.)
 
 **What TracePatch does:** finds the crashing line, decides whether chunking is
 safe there, rewrites the code, and **only accepts the rewrite after checking it**:
@@ -130,7 +131,7 @@ chunk and **merge** the partial results into the exact whole-file answer:
 | `len` (rows) | chunk rows | add them | ✅ |
 | `min` / `max` | chunk min/max | min/max of those | ✅ |
 | `mean` | sum and count | total sum ÷ total count | ✅ (built from sum + count) |
-| `median`, `quantile` | — | no simple merge | ❌ |
+| `median`, `quantile` | a tally: how often each value occurs | add the tallies, count to the middle | ✅ (since Oct 15; see section 16) |
 | `sort_values`, `rank` | — | needs global order | ❌ |
 | `drop_duplicates`, `nunique` | — | duplicates can be in different chunks | ❌ |
 | `cumsum`, `shift`, `rolling` | — | depend on neighbouring rows across chunk edges | ❌ |
@@ -293,17 +294,18 @@ tracepatch/             the tool itself (a Python package)
 demo/
   clinvar_summary.py    REAL data: record count + lab submissions      → FIXED
   clinvar_pathogenic.py REAL data: how many records are pathogenic     → FIXED
-  clinvar_median.py     REAL data: median submissions                  → REFUSED
+  clinvar_median.py     REAL data: median, 90th percentile, average     → FIXED (tally)
+  clinvar_by_gene.py    REAL data: submissions per gene (group-by)     → REFUSED
   clinvar_needs_llm.py  REAL data: filter rows, then sum               → repaired by the LLM, VERIFIED
   clinvar_llm_rejected.py REAL data: max/min of filtered rows          → LLM answer wrong, REJECTED
   data/clinvar.tsv      the real ClinVar file (downloaded, NOT in git)
   make_data.py          generates a synthetic variant-table CSV (4M rows ≈ 116 MB)
   safe_pipeline.py      synthetic data: sum/count/min/max/len          → FIXED
-  unsafe_pipeline.py    synthetic data: median                         → REFUSED
+  unsafe_pipeline.py    synthetic data: group-by                       → REFUSED
   terminal_demo.sh      optional narrated step-by-step walkthrough
   app.py, web/          optional local web page over the same pipeline
 
-tests/                  98 automated tests (see section 13)
+tests/                  113 automated tests (see section 13)
   conftest.py           shared test data, and a memory limit measured on the test machine
   fixtures/             small scripts the tests run
 
@@ -422,16 +424,18 @@ For every `ast.Call` inside the function (found with `ast.walk`):
 
 Everything not allowed is **refused**. For a clearer message, refused calls are
 sorted into two lists:
-- `unsafe_calls`: the name is in `KNOWN_UNSAFE_METHODS` (e.g. `median`, `sorted`);
+- `unsafe_calls`: the name is in `KNOWN_UNSAFE_METHODS` (e.g. `groupby`, `sorted`);
 - `unknown_calls`: anything else (e.g. `frobnicate`, `my_helper`).
 
 **The lists** (each safe entry has a one-line reason in the code):
 
 ```
 CHUNK_SAFE_METHODS = sum, count, min, max, isna, notna, abs, astype
+SUMMARY_STATS      = mean, median, quantile    (rebuilt from a sum + count or a tally,
+                                                NEVER from per-chunk means or medians)
 SAFE_BUILTINS      = len, range, int, float, str, print
 LOADER_METHODS     = read_csv, read_table      (only loaders that support chunksize=)
-KNOWN_UNSAFE       = median, quantile, mode, sort_values, sort_index, rank,
+KNOWN_UNSAFE       = mode, sort_values, sort_index, rank,
                      drop_duplicates, unique, nunique, std, var, cumsum, shift,
                      rolling, diff, merge, join, groupby, pivot_table, sorted
 ```
@@ -446,7 +450,7 @@ line gives a clean refusal:
 
 ```python
 {"safe": True,  "reason": "", "source_segment": "def depth_summary(path): ...", "function_name": "depth_summary"}
-{"safe": False, "reason": "non-decomposable op: median() at line 17", "source_segment": None}
+{"safe": False, "reason": "non-decomposable op: groupby() at line 17", "source_segment": None}
 {"safe": False, "reason": "crash is at module level (line 4 is not inside a function); TracePatch only rewrites code inside a function", "source_segment": None}
 ```
 
@@ -456,18 +460,13 @@ Refusing is safe, but on its own it is not helpful. So each refused operation
 has a short suggestion (`ADVICE` in `gate2_ast.py`), printed under the refusal:
 
 ```
-REFUSED: non-decomposable op: median() at line 15; nothing was rewritten
-  What you can do: A median needs every value at once, so it cannot be merged from pieces.
-  If the script needs only a few columns, load just those: read_csv(..., usecols=[...]).
+REFUSED: non-decomposable op: groupby() at line 16; nothing was rewritten
+  What you can do: TracePatch does not repair group-by yet. If the script needs
+  only a few columns, load just those: read_csv(..., usecols=[...]).
 ```
 
-This **changes no decision**: the operation is still refused. Two of the
-suggestions were checked on the real ClinVar file:
-
-| Refused | Advice | Result of following it |
-|---|---|---|
-| `df[col].median()` | load only that column with `usecols` | runs in 107 MB instead of being killed at 500 MB; same answer (3.0) |
-| `df[col].mean()` | write it as `df[col].sum() / df[col].count()` | TracePatch repairs that form; verified, same answer |
+This **changes no decision**: the operation is still refused. (Before Oct 15 the
+median and the mean were refused too, with advice; both are now repaired directly.)
 
 ### The three bugs fixed in Phase 0
 
@@ -1088,7 +1087,8 @@ You run them from the project folder with no arguments: `python3 demo/clinvar_su
 |---|---|---|---|
 | `clinvar_summary.py` | records, total lab submissions, average and maximum per record | **VERIFIED** | `len`, `sum`, `max` are chunk-safe |
 | `clinvar_pathogenic.py` | how many records are pathogenic: `(df["ClinSigSimple"] == 1).sum()` | **VERIFIED** | counting matching rows is chunk-safe |
-| `clinvar_median.py` | median submissions per record | **REFUSED** by Gate 2 | a median cannot be merged from chunks |
+| `clinvar_median.py` | median, 90th percentile and average submissions per record | **VERIFIED**: 3.0, 12.0, 5.07 in 182 MB | median and percentile from a tally of the 79 different values; average = total sum ÷ total count |
+| `clinvar_by_gene.py` | submissions per gene (`groupby`) | **REFUSED** by Gate 2 | TracePatch does not repair group-by, so it refuses instead of guessing |
 | `clinvar_needs_llm.py` | submissions for pathogenic records only (filter, then sum) | **VERIFIED** with `--rewriter auto` | the template doesn't know this pattern, so the local LLM writes the repair; the gates verify it |
 | `clinvar_llm_rejected.py` | most and fewest submissions among benign records | **FAILED** after 3 attempts with `--rewriter auto` | the local LLM's rewrite gives a wrong answer; Gate 3 rejects it every time |
 
@@ -1214,17 +1214,31 @@ Most submissions for one record: 95
 
 `python3 -m tracepatch restore demo/clinvar_summary.py` puts the original back.
 
-**The refusal.** `python3 -m tracepatch run demo/clinvar_median.py`:
+**The median.** `python3 -m tracepatch run demo/clinvar_median.py`:
 
 ```
-[Gate 1] KILLED at 554 MB (simulated exit 137); fault at line 14 in median_submissions()
-    14 |     df = pd.read_csv(DATA_FILE, sep="\t")
---- attempt 1/3 ---
-[Gate 2] REFUSED: non-decomposable op: median() at line 15
-REFUSED: non-decomposable op: median() at line 15; nothing was rewritten
+[Gate 1] KILLED at 541 MB (simulated exit 137); fault at line 17 in submission_stats()
+[Gate 2] submission_stats(): every call is on the chunk-safe allowlist -> OK
+[Rewrite] template rewriter produced a chunked submission_stats() (25,000 rows at a time)
+[Gate 3] sandbox on a 5,000-row sample taken from across the file: outputs match -> OK
+[Verify] peak 182 MB, under the 500 MB cap -> OK
+  output:        Median lab submissions per record: 3.0
+                 90th percentile: 12.0
+                 Average: 5.07
 ```
-- **Line 14** is *where* memory blew up (Gate 1).
-- **Line 15** is *why* it can't be fixed (Gate 2 found `.median()`).
+Same three answers as the original run with no limit. Section 16 explains how.
+
+**The refusal.** `python3 -m tracepatch run demo/clinvar_by_gene.py`:
+
+```
+[Gate 1] KILLED at 505 MB (simulated exit 137); fault at line 15 in submissions_per_gene()
+    15 |     df = pd.read_csv(DATA_FILE, sep="\t")
+--- attempt 1/3 ---
+[Gate 2] REFUSED: non-decomposable op: groupby() at line 16
+REFUSED: non-decomposable op: groupby() at line 16; nothing was rewritten
+```
+- **Line 15** is *where* memory blew up (Gate 1).
+- **Line 16** is *why* it can't be fixed (Gate 2 found `.groupby()`).
 
 Nothing is rewritten, and the exit code is 2 (check with `echo $?`).
 
@@ -1243,7 +1257,7 @@ python3 -m tracepatch run demo/unsafe_pipeline.py --data demo/big.csv --mem-limi
 ```
 
 `safe_pipeline.py` (sum, count, min, max, len of `depth`) is verified;
-`unsafe_pipeline.py` (median) is refused.
+`unsafe_pipeline.py` (group-by) is refused.
 
 ### 12.6 Measured memory (macOS, this laptop)
 
@@ -1268,21 +1282,22 @@ Neither adds logic. **The project is the CLI.**
 
 ## 13. The tests
 
-Run all of them with `python3 -m pytest` (98 tests, about 50 s). Add `-v` to see each name.
+Run all of them with `python3 -m pytest` (113 tests, about 60 s). Add `-v` to see each name.
 
 | File | Count | What it proves |
 |---|---|---|
 | `test_doctor.py` | 2 | `doctor` reports ready when the model is installed, and says how to get it when it is not |
-| `test_gate2.py` | 9 | a refusal carries advice (median → load fewer columns; mean → sum ÷ count); safe function accepted; `median` refused; bare `sorted()` refused; unknown method and unknown bare name refused; module-level crash refused (not raised); contract shape |
+| `test_gate2.py` | 9 | a refusal carries advice (group-by → load fewer columns); safe function accepted; median, percentile and mean accepted; group-by and mode refused; bare `sorted()` refused; unknown method and unknown bare name refused; module-level crash refused (not raised); contract shape |
 | `test_tracer.py` | 4 | memory hog killed at the right line and function (exit 137); small script not flagged; normal exception not called OOM; no in-script sample → line `None` |
 | `test_oracle.py` | 10 | **float reordering accepted** although `!=`; chunked sum of 100k random numbers accepted; real difference rejected; int vs float; strings exact; length mismatch; type mismatch; NaN = NaN; DataFrames; tuples |
 | `test_sandbox.py` | 10 | **a patch that sets `CHUNKSIZE` itself is rejected**; good patch verified; **"keeps only the last chunk" bug caught**; missing CHUNKSIZE rejected; TODO rejected; exception; timeout; memory cap; **API key not leaked**; sample/imports helpers |
 | `test_rewriter.py` | 15 | a bad model answer is retryable but `CANNOT_CHUNK` is not; an unreachable local model fails clearly; `auto` picks template / local / Claude correctly; template output **verified by Gate 3**; repeated expression computed once; **rows matching a condition counted correctly**; filter-then-sum refused; unsupported use refused; no loader; already chunked; LLM with fake client: fences stripped, feedback sent, refusal / CANNOT_CHUNK / bad Python, no key; **Claude only called when the template can't** |
-| `test_orchestrator.py` | 7 | full pipeline verified on 1M rows (output = uncapped pandas); median refused, nothing written; module-level refused; no problem under cap; **retry loop stops at exactly 3**; cap can't be raised; splice helpers |
+| `test_orchestrator.py` | 7 | full pipeline verified on 1M rows (output = uncapped pandas); group-by refused, nothing written; module-level refused; no problem under cap; **retry loop stops at exactly 3**; cap can't be raised; splice helpers |
 | `test_hardening.py` | 26 | every problem found in the risk review: printed output is compared; a silent function is not "verified"; unsafe patches are rejected **without running**; averaging chunk averages is caught; gzip and non-UTF-8 data; the sample spans the file; chunk size is halved until it fits; clear reasons (class method, extra arguments, returns the whole table, flat script, limit too low); the backup is never overwritten |
 | `test_interactive.py` | 2 | dragged-in paths (quoted, escaped spaces) are cleaned; chunk size follows row width |
 | `test_script_only.py` | 11 | **the one-command `fix`** repairs and replaces a script, says so if run twice, and leaves an unsafe script untouched; the three ways a script can name its data file are recognised; a script with the path inside is **repaired with no `--data`**; **Gate 3 really uses the sample** (a full read would break a 150 MB cap); a patch that reads a different file is rejected; `--apply` keeps a backup and the script then **survives the same limit that killed it** |
 | `test_end_to_end.py` | 2 | the real demo files through the real CLI |
+| `test_summary_stats.py` | 15 | median, 8 percentiles and mean **match pandas through Gate 3**: even and odd row counts, decimals with missing values, lopsided data like ClinVar, no values at all, one row; one tally per column; forms it does not know are not rewritten; the median pipeline is repaired with the exact median; **a tally too big for memory fails clearly** |
 
 Three kinds of test: **unit** (one function, e.g. the oracle), **integration**
 (two stages together, e.g. template output through Gate 3) and **end-to-end**
@@ -1296,7 +1311,8 @@ Three kinds of test: **unit** (one function, e.g. the oracle), **integration**
 | `small.py` | prints `499500` |
 | `crashes.py` | raises a normal error |
 | `sum_pipeline.py` | a fixable pipeline |
-| `median_pipeline.py` | a pipeline that must be refused |
+| `median_pipeline.py` | a median pipeline, repaired with a tally |
+| `groupby_pipeline.py` | a pipeline that must be refused |
 | `module_level_pipeline.py` | `read_csv` outside any function |
 
 The **retry-loop test** uses a fake `WastefulRewriter`. Its patch gives the right
@@ -1400,8 +1416,11 @@ a wrong answer; the [risk review](RISK_REVIEW.md) shows how.
   answer to compare with.
 - **The full-scale run proves memory, not correctness.**
 - **Only operations known to be chunk-safe are repaired.** The allowlist is small
-  (8 methods + 6 builtins) and matches by name. `median`, `sort_values`,
-  `groupby`, `mean()` and anything unrecognised are refused.
+  (8 methods + 3 summary statistics + 6 builtins) and matches by name.
+  `sort_values`, `groupby`, `drop_duplicates` and anything unrecognised are refused.
+- **A median or percentile only saves memory when values repeat.** The tally has
+  one line per different value. If almost every value is different, it is as big
+  as the column; the full-file check then fails and nothing is accepted.
 - **The loading must be inside a function that returns or prints its result.** A
   flat script, a class method, or a function that returns the whole table is
   refused or fails with an explanation of how to restructure it.
@@ -1422,23 +1441,53 @@ a wrong answer; the [risk review](RISK_REVIEW.md) shows how.
 
 ## 16. What about median?
 
-Today TracePatch **refuses** a median, on purpose: no fix is better than a wrong one.
+Since Oct 15 TracePatch **repairs** a median, a percentile and a mean exactly.
+Our guide asked for it. Here is how, from the start.
 
-Exact low-memory approaches exist, as future work:
+**What a median is.** Line the values up from smallest to largest; the median is
+the one in the middle. Marks `9, 1, 3, 9, 2, 1, 9` sorted are `1, 1, 2, 3, 9, 9, 9`;
+the 4th of 7 is **3**.
 
-1. **Load only the needed column** (`usecols=["depth"]`). This is exact and
-   much smaller, but memory still grows with the file size.
-2. **Count values per chunk** (`value_counts()`, then add the counts together),
-   then walk the counts to the middle. This is exact and memory depends on the
-   number of *distinct* values. It works well for integer read depths.
-3. **Two passes:**
-   - pass 1 counts values in ranges to find the range holding the median;
-   - pass 2 collects only that range and takes the exact middle.
-4. **Approximate** (t-digest, sampling). This is not exact, so it must be an
-   explicit, clearly labelled opt-in.
+**Why pieces break it.** Split them into `[1, 1, 2]` and `[3, 9, 9, 9]`. The
+medians of the pieces are 1 and 9, and the middle of those is 5. Wrong, and with
+no error. So TracePatch **never** takes the median of each piece.
 
-Median should **not** just be added to `CHUNK_SAFE_METHODS`. It would need its
-own "special merge" category plus a matching rewrite template, still checked by Gate 3.
+**What it does instead: a tally.** For each piece it counts how many rows have
+each value (`value_counts()`), and adds those counts to a running tally:
+
+```
+piece 1:  1 → 2,  2 → 1
+piece 2:  3 → 1,  9 → 3
+tally:    1 → 2,  2 → 1,  3 → 1,  9 → 3      (7 rows)
+```
+
+Then it walks the tally in order: value 1 covers rows 1–2, value 2 row 3, value 3
+row 4. The middle row is the 4th, so the median is **3**. Exact.
+
+**Percentiles** are the same walk, stopping at another place. pandas puts
+percentile q at position q × (n − 1) in the sorted values, and goes partway
+between the two neighbours when that position is not a whole number. The repair
+does exactly the same, so the answers match (checked through Gate 3 for even and
+odd counts, missing values, an empty column and uneven chunks).
+
+**The mean** is not the mean of the piece means either (pieces differ in size).
+The repair keeps each piece's sum and count and divides the totals once.
+
+**Why the tally is small.** Its size is the number of *different* values, not the
+number of rows. ClinVar's `NumberSubmitters` column has 300,000 rows but only 79
+different values, so the tally has 79 lines. The repaired script used 182 MB
+instead of being killed at 500 MB, with the same answers (3.0, 12.0, 5.07).
+
+**The honest limit.** If almost every value is different (for example decimal
+measurements), the tally is as big as the column. That is still far smaller than
+the whole table, so it may fit; the full-file check measures it. If it does not
+fit, the run fails with "one count for every DIFFERENT value … Nothing was
+accepted". It never returns a guess.
+
+**Where it sits in the code.** Gate 2 has a separate list, `SUMMARY_STATS`
+(`mean`, `median`, `quantile`), apart from `CHUNK_SAFE_METHODS`, because these are
+*not* merged from the same statistic per chunk. The template rewriter writes the
+sum-and-count or the tally code. Gate 3 and the full-file check are unchanged.
 
 ---
 
@@ -1491,8 +1540,9 @@ A sampler thread inside the child writes the current line and memory every
 is the culprit.
 
 **Q: Why not just chunk everything?**
-Because operations like median, sort or drop_duplicates give wrong answers when
-chunked, with no error. The median of chunk medians isn't the median.
+Because chunking naively gives wrong answers with no error: the median of chunk
+medians isn't the median. TracePatch handles the median with a tally (section 16)
+and refuses what it cannot prove, such as sorting or group-by.
 
 **Q: Why an allowlist and not a blocklist?**
 A blocklist allows anything it forgot, so it fails unsafe. An allowlist refuses
@@ -1559,8 +1609,9 @@ It's read only from an environment variable. It's never in the code, `.env` is
 gitignored, and the sandbox doesn't pass it to generated code (there's a test for this).
 
 **Q: What happens with median?**
-Gate 2 refuses it and nothing is changed. Exact low-memory methods exist, such as
-counting values per chunk or two-pass selection; adding them is future work.
+It is repaired exactly: a tally of how often each value occurs is kept per chunk,
+the tallies are added, and the median is found by counting to the middle. The
+same tally gives any percentile. See section 16.
 
 **Q: What happens if the crash is outside a function?**
 Gate 2 returns a clean refusal: "crash is at module level … TracePatch only
@@ -1587,8 +1638,8 @@ system with no error message. TracePatch runs the script under a memory limit,
 records which line was running when it was killed, checks from the code whether
 the calculation can be done piece by piece, rewrites the load to read in chunks,
 and accepts the rewrite only if it gives the same answer on a sample and stays
-under the limit on the full file. If the calculation can't be chunked safely,
-like a median, it refuses.
+under the limit on the full file. If it can't prove the calculation is safe
+in pieces, like a group-by, it refuses.
 
 **Q: What is your contribution? Chunking is not new.**
 Chunking isn't. The contribution is the **pipeline of checks around it**: finding
@@ -1759,7 +1810,7 @@ security sandbox; we state that as a limit.
 #### About testing and your work
 
 **Q: How did you test it?**
-98 automated tests: unit tests for each gate, integration tests that pass a
+113 automated tests: unit tests for each gate, integration tests that pass a
 rewrite through Gate 3, and end-to-end tests of the CLI. Plus manual runs on the
 real ClinVar file, checked against plain pandas.
 
@@ -1768,7 +1819,7 @@ Pick one from section 14: the test script that used 300 MB in 10 ms, the sample
 that fitted in one chunk, or the ClinVar chunks that were too big.
 
 **Q: What would you do next?**
-Median and other operations with special merges; group-by and filter patterns;
+Group-by and filter patterns; other statistics with special merges (standard deviation, mode);
 code outside functions; random sampling for Gate 3; choosing the chunk size from
 the memory cap; a live evaluation of the LLM rewriter; running automatically
 when a cluster job is killed.
@@ -1862,7 +1913,7 @@ The verification idea is the part worth keeping.
 
 ```bash
 pip install -r requirements.txt          # install libraries
-python3 -m pytest                        # all 98 tests
+python3 -m pytest                        # all 113 tests
 python3 -m tracepatch doctor             # is everything, including the AI model, ready?
 
 # One command does everything
@@ -1880,7 +1931,8 @@ python3 -m tracepatch restore demo/clinvar_summary.py    # put the original back
 python3 -m tracepatch run demo/clinvar_summary.py
 python3 -m tracepatch run demo/clinvar_summary.py --apply
 python3 -m tracepatch run demo/clinvar_pathogenic.py
-python3 -m tracepatch run demo/clinvar_median.py         # refused
+python3 -m tracepatch run demo/clinvar_median.py         # median + percentile: verified
+python3 -m tracepatch run demo/clinvar_by_gene.py        # group-by: refused
 python3 -m tracepatch run demo/clinvar_needs_llm.py      # template alone can't (see below)
 
 echo $?                                  # exit code of the last command (0 / 1 / 2)
@@ -1973,7 +2025,7 @@ account of a specific lab.
 | Approach | Good | Weak |
 |---|---|---|
 | Ask for more memory and re-run | no code change | wastes cluster time; has a ceiling; the cause is never found |
-| Rewrite by hand (chunks, `usecols`, dtypes) | full control | slow, and easy to get silently wrong (median, duplicates) |
+| Rewrite by hand (chunks, `usecols`, dtypes) | full control | slow, and easy to get silently wrong (median of medians, duplicates) |
 | Switch engine (Dask, Polars, DuckDB) | scales well | a rewrite in a new library; nothing checks the answer is unchanged |
 | Ask an LLM to "make it memory efficient" | fast | no guarantee the result is correct or actually fits |
 
